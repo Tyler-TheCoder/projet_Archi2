@@ -304,12 +304,16 @@ PROC Task3_NormalizeMatrix
     PUSH DI
 
     ;-- Step A: build normalized_matrix from cleaned_matrix --
-    LEA  SI, [cleaned_matrix]
+    LEA  SI, [cleaned_matrix]      ; load effective address
     LEA  DI, [normalized_matrix]
+    ; Its primary purpose is to calculate a memory address and store that address in a register
+    ; without actually accessing the memory at that location
     MOV  CX, TOTAL_CELLS
 
 @@T3NormLoop:
     LODSB                    ; AL = ASCII digit ('0'..'9')
+    ; load string byte , It transfers 1 byte of data from memory into the AL register.
+    ; it reads from the address pointed by DS:SI registers
     SUB  AL, '0'             ; convert to numeric value 0..9
     CMP  AL, 5
     JAE  @@T3SetOne          ; >= 5 -> map to 1
@@ -320,10 +324,13 @@ PROC Task3_NormalizeMatrix
     MOV  AL, '1'
 
 @@T3Store:
-    STOSB
+    STOSB                    ; store string byte
+    ; store the byte content of the AL register into a specific memory location 
+    ; pointed to by the ES:DI
+
     LOOP @@T3NormLoop
 
-    ;-- Step B: display normalized matrix --
+    ;-- display normalized matrix --
     CALL ClearScreen
 
     MOV  DH, 0
