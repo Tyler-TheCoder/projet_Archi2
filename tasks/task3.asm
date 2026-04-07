@@ -1,3 +1,6 @@
+; Akrams work
+
+
 ;===========================================================================
 ; TASK 3  -  Normalize matrix
 ;   Source: cleaned_matrix   Destination: normalized_matrix
