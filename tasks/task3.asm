@@ -23,27 +23,61 @@ PROC Task3_NormalizeMatrix
     ; without actually accessing the memory at that location
     MOV  CX, TOTAL_CELLS
 
-@@T3NormLoop:
+@T3NormLoop:
     LODSB                    ; AL = ASCII digit ('0'..'9')
     ; load string byte , It transfers 1 byte of data from memory into the AL register.
     ; it reads from the address pointed by DS:SI registers
     SUB  AL, '0'             ; convert to numeric value 0..9
-    CMP  AL, 5
-    JAE  @@T3SetOne          ; >= 5 -> map to 1
-    MOV  AL, '0'
-    JMP  @@T3Store
+    CMP  AL, 5              ; compare between AL and 5
+    JAE  @T3SetOne          ; AL >= 5 jump to that label
+    MOV  AL, '0'            ; if AL < 5 execute this code else
+    JMP  @T3Store           ; will be ignored
 
-@@T3SetOne:
+@T3SetOne:
     MOV  AL, '1'
 
-@@T3Store:
+@T3Store:
     STOSB                    ; store string byte
-    ; store the byte content of the AL register into a specific memory location 
-    ; pointed to by the ES:DI
+    ; store the byte content of the AL register into a specific memory location
+    ; pointed to by the DS:DI
 
-    LOOP @@T3NormLoop
+    LOOP @T3NormLoop
 
     ;-- display normalized matrix --
+    CALL DisplayNormalizedMatrix  ; display the matrix
+
+    POP  DI
+    POP  SI
+    POP  DX
+    POP  CX
+    POP  BX
+    POP  AX
+    RET
+
+ENDP Task3_NormalizeMatrix
+
+;===========================================================================
+; DisplayNormalizedMatrix
+;   Clears the screen, prints the date/time header, the task subtitle,
+;   and then dumps normalized_matrix row by row in WHITE_ON_BLACK colour.
+;
+;   Inputs  : none  (reads normalized_matrix and str_t3_sub from .DATA)
+;   Outputs : none
+;   Modifies: nothing  (all registers saved / restored)
+;
+;   To reuse this pattern for another task, copy the proc, rename it
+;   (e.g. DisplayCleanedMatrix), and change:
+;       - LEA  SI, [normalized_matrix]  ->  LEA  SI, [cleaned_matrix]
+;       - LEA  SI, [str_t3_sub]         ->  LEA  SI, [str_t2_sub]
+;===========================================================================
+PROC DisplayNormalizedMatrix
+
+    PUSH AX
+    PUSH BX
+    PUSH CX
+    PUSH DX
+    PUSH SI
+
     CALL ClearScreen
 
     MOV  DH, 0
@@ -67,26 +101,25 @@ PROC Task3_NormalizeMatrix
     LEA  SI, [normalized_matrix]
     MOV  CX, ROWS
 
-@@T3RowLoop:
+@DNMRowLoop:
     PUSH CX
     MOV  DL, 18
     CALL SetCursorPos
     MOV  CX, COLS
 
-@@T3ColLoop:
+@DNMColLoop:
     LODSB
     MOV  BL, WHITE_ON_BLACK
     CALL DisplayColorChar
     MOV  AL, ' '
     CALL DisplayColorChar
 
-    LOOP @@T3ColLoop
+    LOOP @DNMColLoop
 
     INC  DH
     POP  CX
-    LOOP @@T3RowLoop
+    LOOP @DNMRowLoop
 
-    POP  DI
     POP  SI
     POP  DX
     POP  CX
@@ -94,7 +127,8 @@ PROC Task3_NormalizeMatrix
     POP  AX
     RET
 
-ENDP Task3_NormalizeMatrix
+ENDP DisplayNormalizedMatrix
+
 ;===========================================================================
 ; UTILITY PROCEDURES
 ;===========================================================================
@@ -201,16 +235,16 @@ PROC PrintString
     PUSH BX
     PUSH SI
 
-@@PSLoop:
+@PSLoop:
     LODSB                    ; AL = next character
     CMP  AL, 0
-    JE   @@PSDone
+    JE   @PSDone
     MOV  AH, 0Eh             ; TTY write (auto-advances cursor)
     MOV  BH, 0
     INT  10h
-    JMP  @@PSLoop
+    JMP  @PSLoop
 
-@@PSDone:
+@PSDone:
     POP  SI
     POP  BX
     POP  AX
@@ -332,12 +366,12 @@ PROC PrintDateTime
     LEA  SI, [day_names]
     ADD  SI, AX
     MOV  CX, 3
-@@PDDayLoop:
+@PDDayLoop:
     LODSB
     MOV  AH, 0Eh
     MOV  BH, 0
     INT  10h
-    LOOP @@PDDayLoop
+    LOOP @PDDayLoop
 
     MOV  AL, ' '             ; space after day name
     MOV  AH, 0Eh
@@ -360,12 +394,12 @@ PROC PrintDateTime
     LEA  SI, [month_names]
     ADD  SI, AX
     MOV  CX, 3
-@@PDMonLoop:
+@PDMonLoop:
     LODSB
     MOV  AH, 0Eh
     MOV  BH, 0
     INT  10h
-    LOOP @@PDMonLoop
+    LOOP @PDMonLoop
 
     MOV  AL, ' '
     MOV  AH, 0Eh
