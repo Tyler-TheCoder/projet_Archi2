@@ -38,36 +38,36 @@ PROC Task1_DisplayOriginal
     LEA  SI, [original_matrix]
     MOV  CX, ROWS
 
-@@T1RowLoop:
+@T1RowLoop:
     PUSH CX
     MOV  DL, 18
     CALL SetCursorPos
     MOV  CX, COLS
 
-@@T1ColLoop:
+@T1ColLoop:
     LODSB                    ; AL = current matrix byte, SI advances
 
     CMP  AL, '0'
-    JB   @@T1NotDigit
+    JB   @T1NotDigit
     CMP  AL, '9'
-    JA   @@T1NotDigit
+    JA   @T1NotDigit
     MOV  BL, WHITE_ON_BLACK
-    JMP  @@T1Print
+    JMP  @T1Print
 
-@@T1NotDigit:
+@T1NotDigit:
     MOV  BL, RED_ON_BLACK
 
-@@T1Print:
+@T1Print:
     CALL DisplayColorChar    ; prints AL with attribute BL, advances cursor
     MOV  AL, ' '
     MOV  BL, WHITE_ON_BLACK
     CALL DisplayColorChar    ; space separator between elements
 
-    LOOP @@T1ColLoop
+    LOOP @T1ColLoop
 
     INC  DH                  ; move down one screen row
     POP  CX
-    LOOP @@T1RowLoop
+    LOOP @T1RowLoop
 
     POP  SI
     POP  DX

@@ -1,15 +1,215 @@
+SEGMENT .DATA
+
+    ;-----------------------------------------------------------------------
+    ; Original matrix  4 rows x 7 columns = 28 bytes
+    ; Mix of digits and non-digit characters / symbols
+    ; Special chars given as hex literals for safe TASM parsing:
+    ;   9Ch = ??    2Dh = -    26h = &    2Fh = /    2Ah = *    3Dh = =
+    ;-----------------------------------------------------------------------
+    original_matrix   DB '9','7',9Ch,'2','1',2Dh,'2'
+                      DB '4','M','8','2','6','3','F'
+                      DB '9','u',9Ch,'4',26h,'6','7'
+                      DB '0',2Fh,'6','2',2Ah,3Dh,'8'
+
+    cleaned_matrix    DB 28 DUP(0)    ; populated by Task2
+    normalized_matrix DB 28 DUP(0)   ; populated by Task3
+
+    ;--- Compile-time constants (EQU is safe; avoids expression-in-MOV) ---
+    ROWS        EQU 4
+    COLS        EQU 7
+    TOTAL_CELLS EQU 28       ; = ROWS * COLS  (literal avoids TASM bug)
+
+    ;--- Video color attributes for INT 10h / AH=09h ----------------------
+    WHITE_ON_BLACK EQU 07h
+    RED_ON_BLACK   EQU 0Ch
+
+    ;--- Null-terminated strings for screen headers -----------------------
+    str_header DB 'MATRIX PREPROCESSING',0
+    str_t1_sub DB '______________Step 1 :Original Matrix_____________',0
+    str_t2_sub DB '__________Step 2: Matrix Data Cleaning________',0
+    str_t3_sub DB '________Step 3: Matrix Data Normalization______',0
+
+    ;--- Day name table  (3 bytes per entry, 0=Sun .. 6=Sat) --------------
+    day_names  DB 'Sun','Mon','Tue','Wed','Thu','Fri','Sat'
+
+    ;--- Month name table (3 bytes per entry, index 0=Jan .. 11=Dec) ------
+    month_names DB 'Jan','Feb','Mar','Apr','May','Jun'
+                DB 'Jul','Aug','Sep','Oct','Nov','Dec'
+
+    ;--- Date/time scratch variables written by PrintDateTime -------------
+    dt_dow  DB 0        ; day of week   0-6   (0=Sunday)
+    dt_day  DB 0        ; day           1-31
+    dt_mon  DB 0        ; month         1-12
+    dt_year DW 0        ; year          e.g. 2026
+    dt_hour DB 0        ; hour          0-23
+    dt_min  DB 0        ; minute        0-59
+    dt_sec  DB 0        ; second        0-59
+
+ENDS .DATA
+
+SEGMENT .CODE 
+
+    ASSUME CS:.CODE, DS:.DATA
+
+
+;=======================================================================
+; MAIN PROGRAM
+    
+    CALL Task1_DisplayOriginal
+
+    MOV  AH, 00h             ; wait for keypress (testing convenience)
+    INT  16h
+
+    CALL Task2_CleanMatrix
+
+    MOV  AH, 00h
+    INT  16h
+
+    CALL Task3_NormalizeMatrix
+
+    MOV  AH, 00h
+    INT  16h
+
+    MOV  AH, 4Ch             ; terminate program (DOS exit)
+    MOV  AL, 00h
+    INT  21h
+
 
 ;===========================================================================
-; DisplayYourMatrix
-;   Clears the screen, prints the date/time header, the task subtitle,
-;   and then dumps Your_matrix row by row in WHITE_ON_BLACK colour.
-;
-;   To reuse this pattern for another task, copy the proc, rename it
-;   (e.g. DisplayYourMatrix), and change:
-;       - LEA  SI, [normalized_matrix]  ->  LEA  SI, [your_matrix]
-;       - LEA  SI, [str_t3_sub]         ->  LEA  SI, [str_yourTask_sub]
+; TASK 1  -  Display original matrix
+;   Digits     -> printed in WHITE
+;   Non-digits -> printed in RED
 ;===========================================================================
-PROC DisplayYourMatrix
+PROC Task1_DisplayOriginal
+
+    PUSH AX
+    PUSH BX
+    PUSH CX
+    PUSH DX
+    PUSH SI
+
+    CALL ClearScreen
+
+    ;-- row 0: date and time --
+    MOV  DH, 0
+    MOV  DL, 1
+    CALL SetCursorPos
+    CALL PrintDateTime
+
+    ;-- row 1: title --
+    MOV  DH, 1
+    MOV  DL, 10
+    CALL SetCursorPos
+    LEA  SI, [str_header]
+    CALL PrintString
+
+    ;-- row 2: subtitle --
+    MOV  DH, 2
+    MOV  DL, 5
+    CALL SetCursorPos
+    LEA  SI, [str_t1_sub]
+    CALL PrintString
+
+    ;-- rows 4+: matrix body --
+    MOV  DH, 4
+    LEA  SI, [original_matrix]
+    MOV  CX, ROWS
+
+@T1RowLoop:
+    PUSH CX
+    MOV  DL, 18
+    CALL SetCursorPos
+    MOV  CX, COLS
+
+@T1ColLoop:
+    LODSB                    ; AL = current matrix byte, SI advances
+
+    CMP  AL, '0'
+    JB   @T1NotDigit
+    CMP  AL, '9'
+    JA   @T1NotDigit
+    MOV  BL, WHITE_ON_BLACK
+    JMP  @T1Print
+
+@T1NotDigit:
+    MOV  BL, RED_ON_BLACK
+
+@T1Print:
+    CALL DisplayColorChar    ; prints AL with attribute BL, advances cursor
+    MOV  AL, ' '
+    MOV  BL, WHITE_ON_BLACK
+    CALL DisplayColorChar    ; space separator between elements
+
+    LOOP @T1ColLoop
+
+    INC  DH                  ; move down one screen row
+    POP  CX
+    LOOP @T1RowLoop
+
+    POP  SI
+    POP  DX
+    POP  CX
+    POP  BX
+    POP  AX
+    RET
+
+ENDP Task1_DisplayOriginal
+
+
+;===========================================================================
+; TASK 2  -  Clean matrix
+;   Non-digit characters replaced by ASCII '0'
+;   Replaced cells shown in RED, unchanged digits in WHITE
+;===========================================================================
+PROC Task2_CleanMatrix
+
+    PUSH AX
+    PUSH BX
+    PUSH CX
+    PUSH DX
+    PUSH SI
+    PUSH DI
+
+    ; copy original , replace non-digits with '0' 
+    LEA  SI, [original_matrix]
+    LEA  DI, [cleaned_matrix]
+    MOV  CX, TOTAL_CELLS
+
+@T2CleanLoop:
+    LODSB                    ; load single byte from original matrix , ( AL = DS:SI )
+    CMP  AL, '0'
+    JB   @T2Replace          ; if al < 0  => not a digit
+    CMP  AL, '9'
+    JA   @T2Replace          ; if al > 9  => not a digit
+        
+        ; this section handles digits
+    STOSB                    ; store single byte to the cleaned matrix .   
+    JMP  @T2Next
+        
+        ; this label handles non digits (replace characters with '0')
+@T2Replace:
+    MOV  AL, '0'
+    STOSB                    ; not a digit: store '0'
+
+@T2Next:
+    LOOP @T2CleanLoop
+
+
+    POP  DI
+    POP  SI
+    POP  DX
+    POP  CX
+    POP  BX
+    POP  AX
+    RET
+
+ENDP Task2_CleanMatrix
+
+
+  ; display procedure for task 2
+
+
+PROC DisplayT2Matrix
 
     PUSH AX
     PUSH BX
@@ -33,11 +233,11 @@ PROC DisplayYourMatrix
     MOV  DH, 2
     MOV  DL, 5
     CALL SetCursorPos
-    LEA  SI, [str_yourTask_sub]      ; set your task header here
+    LEA  SI, [str_2_sub]
     CALL PrintString
 
     MOV  DH, 4
-    LEA  SI, [your_matrix]           ; set your matrix here
+    LEA  SI, [cleaned_matrix]    
     MOV  CX, ROWS
 
 @DNMRowLoop:
@@ -67,6 +267,138 @@ PROC DisplayYourMatrix
     RET
 
 ENDP DisplayNormalizedMatrix
+
+
+;===========================================================================
+; TASK 3  -  Normalize matrix
+;   Source: cleaned_matrix   Destination: normalized_matrix
+;   digit < 5  -> stored as ASCII '0'
+;   digit >= 5 -> stored as ASCII '1'
+;===========================================================================
+PROC Task3_NormalizeMatrix
+
+    PUSH AX
+    PUSH BX
+    PUSH CX
+    PUSH DX
+    PUSH SI
+    PUSH DI
+
+    ;-- Step A: build normalized_matrix from cleaned_matrix --
+    LEA  SI, [cleaned_matrix]      ; load effective address
+    LEA  DI, [normalized_matrix]
+    ; Its primary purpose is to calculate a memory address and store that address in a register
+    ; without actually accessing the memory at that location
+    MOV  CX, TOTAL_CELLS
+
+@T3NormLoop:
+    LODSB                    ; AL = ASCII digit ('0'..'9')
+    ; load string byte , It transfers 1 byte of data from memory into the AL register.
+    ; it reads from the address pointed by DS:SI registers
+    SUB  AL, '0'             ; convert to numeric value 0..9
+    CMP  AL, 5              ; compare between AL and 5
+    JAE  @T3SetOne          ; AL >= 5 jump to that label
+    MOV  AL, '0'            ; if AL < 5 execute this code else
+    JMP  @T3Store           ; will be ignored
+
+@T3SetOne:
+    MOV  AL, '1'
+
+@T3Store:
+    STOSB                    ; store string byte
+    ; store the byte content of the AL register into a specific memory location
+    ; pointed to by the DS:DI
+
+    LOOP @T3NormLoop
+
+    ;-- display normalized matrix --
+    CALL DisplayNormalizedMatrix  ; display the matrix
+
+    POP  DI
+    POP  SI
+    POP  DX
+    POP  CX
+    POP  BX
+    POP  AX
+    RET
+
+ENDP Task3_NormalizeMatrix
+
+
+;===========================================================================
+; DisplayNormalizedMatrix
+;   Clears the screen, prints the date/time header, the task subtitle,
+;   and then dumps normalized_matrix row by row in WHITE_ON_BLACK colour.
+;
+;   Inputs  : none  (reads normalized_matrix and str_t3_sub from .DATA)
+;   Outputs : none
+;   Modifies: nothing  (all registers saved / restored)
+;
+;   To reuse this pattern for another task, copy the proc, rename it
+;   (e.g. DisplayCleanedMatrix), and change:
+;       - LEA  SI, [normalized_matrix]  ->  LEA  SI, [cleaned_matrix]
+;       - LEA  SI, [str_t3_sub]         ->  LEA  SI, [str_t2_sub]
+;===========================================================================
+PROC DisplayNormalizedMatrix
+
+    PUSH AX
+    PUSH BX
+    PUSH CX
+    PUSH DX
+    PUSH SI
+
+    CALL ClearScreen
+
+    MOV  DH, 0
+    MOV  DL, 1
+    CALL SetCursorPos
+    CALL PrintDateTime
+
+    MOV  DH, 1
+    MOV  DL, 10
+    CALL SetCursorPos
+    LEA  SI, [str_header]
+    CALL PrintString
+
+    MOV  DH, 2
+    MOV  DL, 5
+    CALL SetCursorPos
+    LEA  SI, [str_t3_sub]
+    CALL PrintString
+
+    MOV  DH, 4
+    LEA  SI, [normalized_matrix]
+    MOV  CX, ROWS
+
+@DNMRowLoop:
+    PUSH CX
+    MOV  DL, 18
+    CALL SetCursorPos
+    MOV  CX, COLS
+
+@DNMColLoop:
+    LODSB
+    MOV  BL, WHITE_ON_BLACK
+    CALL DisplayColorChar
+    MOV  AL, ' '
+    CALL DisplayColorChar
+
+    LOOP @DNMColLoop
+
+    INC  DH
+    POP  CX
+    LOOP @DNMRowLoop
+
+    POP  SI
+    POP  DX
+    POP  CX
+    POP  BX
+    POP  AX
+    RET
+
+ENDP DisplayNormalizedMatrix
+
+
 
 ;===========================================================================
 ; UTILITY PROCEDURES
@@ -378,3 +710,6 @@ PROC PrintDateTime
     RET
 
 ENDP PrintDateTime
+
+
+ENDS .CODE
