@@ -1,373 +1,424 @@
 ;===========================================================================
-; Program  : 2_lessons_on_matrices.asm
+; Program  : 2_lessons_on_matrices.asm  (Tasks 1, 2, 3)
 ; Course   : ARCHI II  -  L2 ACAD A  2025-2026  (USTHB, FI)
-; Author   : [Your Name / Group]
 ;
-; Description:
-;   Interrupt-driven matrix processing demo using INT 1Ch periodic timer.
-;   Every 30 seconds the timer ISR sets a flag; the main loop dispatches
-;   the next task from a scenario lookup table.
+; What this program does:
+;   Task 1 - shows the original matrix, non-digit chars highlighted in red
+;   Task 2 - cleans the matrix by replacing non-digits with '0' (red)
+;   Task 3 - normalizes the matrix: digits < 5 become 0, digits >= 5 become 1
 ;
-;   Scenario (16 steps total):
-;     T1 T2 T3 T4 T5   T1 T2 T3 T4 T5   T6 T7 T6 T7 T6 T7
-;
-;   Lesson 1 (x2) - Tasks 1-5 : matrix preprocessing
-;   Lesson 2 (x3) - Tasks 6-7 : matrix reflections (T6 then T7 per pair)
-;
-;   Timer:  INT 1Ch fires ~18.2 times/sec.  546 ticks = 30 seconds.
-;
-; Tool    : GUI Turbo Assembler x64  (TASM 4.1 / TLINK)
-; Mode    : IDEAL  (required: fixes @DATA undefined error in TASM 4.1)
+; Each task waits for a keypress before moving to the next one.
 ;===========================================================================
 
-IDEAL
-MODEL  SMALL
-STACK  200h
+.MODEL SMALL        ; one code segment + one data segment (standard for DOS)
+.STACK 200h         ; reserve 512 bytes for the stack
 
 ;===========================================================================
-; DATA SEGMENT
+; DATA SEGMENT  -  all variables and constants live here
 ;===========================================================================
-SEGMENT _DATA
+.DATA 
 
-    ;-----------------------------------------------------------------------
-    ; Original 4x7 matrix (4 rows, 7 columns = 28 bytes)
-    ; Contains digits AND non-digit symbols/letters to demonstrate cleaning.
-    ; Special chars encoded as hex: 9Ch=£  2Dh=-  26h=&  2Fh=/  2Ah=*  3Dh==
-    ;-----------------------------------------------------------------------
-    original_matrix  DB '9','7',9Ch,'2','1',2Dh,'2'   ; row 0
-                     DB '4','M','8','2','6','3','F'    ; row 1
-                     DB '9','u',9Ch,'4',26h,'6','7'   ; row 2
-                     DB '0',2Fh,'6','2',2Ah,3Dh,'8'  ; row 3
+    ; The matrix is stored row by row in memory (4 rows x 7 cols = 28 bytes).
+    ; Some cells are non-digit characters on purpose (letters, symbols).
+    ; We write special chars as hex to avoid encoding issues in the editor:
+    ;   9Ch = ??    2Dh = -    26h = &    2Fh = /    2Ah = *    3Dh = =
+    original_matrix   DB '9',40h,9Ch,'2','1',2Dh,'2'   ; row 0
+                      DB '4','M','8','3','6','9','F'    ; row 1
+                      DB '4','u',9Ch,'4',26h,40h,'7'   ; row 2
+                      DB '1',2Fh,'6','2',2Ah,3Dh,'8'  ; row 3
 
-    ;--- Derived work matrices (built once at startup, silently) -----------
-    cleaned_matrix    DB 28 DUP(0)  ; Task 2: non-digits replaced by '0'
-    normalized_matrix DB 28 DUP(0)  ; Task 3: values mapped to '0' or '1'
-    reflect_matrix    DB 28 DUP(0)  ; Tasks 6 & 7: working copy reset at T6
+    cleaned_matrix    DB 28 DUP(0)   ; filled by Task 2 (non-digits -> '0')
+    normalized_matrix DB 28 DUP(0)   ; filled by Task 3 (values -> '0'/'1')
+    reflected_matrix  DB 28 DUP(0)   ; filled by Task 6 (flip horizontal)
+    vert_reflected_matrix  DB 28 DUP(0)  ; filled by Task 7 (flip vertical)
 
-    ;--- Accumulators -------------------------------------------------------
-    col_sums  DB 7 DUP(0)   ; Task 5: per-column running sums
-    row_sum   DB 0           ; Tasks 4 & 5: running sum for the current row
 
-    ;--- Compile-time matrix dimensions -------------------------------------
+    ; These are compile-time constants, not memory variables.
+    ; EQU just tells the assembler to substitute the value wherever the name appears.
     ROWS        EQU 4
     COLS        EQU 7
-    TOTAL_CELLS EQU 28       ; ROWS*COLS (literal avoids TASM expression error)
+    TOTAL_CELLS EQU 28   ; 4 * 7, written as a literal to avoid a TASM bug
+                         ; with expressions like ROWS * COLS inside MOV
+    col_sums        DB 7 DUP(0)
 
-    ;--- Video attribute bytes (INT 10h / AH=09h) --------------------------
-    WHITE_ON_BLACK  EQU 07h
-    RED_ON_BLACK    EQU 0Ch
-    GREEN_ON_BLACK  EQU 0Ah
+    ; Color byte format for INT 10h: high nibble = background, low = foreground
+    ; 0 = black background, 7 = white text, C = bright red text
+    WHITE_ON_BLACK EQU 07h
+    RED_ON_BLACK   EQU 0Ch
+    GREEN_ON_BLACK EQU 0Ah
     YELLOW_ON_BLACK EQU 0Eh
 
-    ;--- Display strings (null-terminated) ---------------------------------
-    str_preproc  DB 'MATRIX PREPROCESSING',0
-    str_process  DB 'MATRIX PROCESSING',0
+    ; Null-terminated strings (the 0 at the end tells PrintString to stop)
+    str_header DB 'MATRIX PREPROCESSING',0
+    str_process DB 'MATRIX PROCESSING',0
+    str_t1_sub DB '__Step 1 :Original Matrix_____________',0
+    str_t2_sub DB '__Step 2 : Matrix Data Cleaning________',0
+    str_t3_sub DB '__Step 3 : Matrix Data Normalization______',0
+    str_t4_sub DB '__Step 4 : Matrix Reduction on Rows______',0
+    str_t5_sub DB '__Step 5 : Matrix Reduction on Rows and Columns_',0
+    str_t6_sub DB '__Step 6 : Horizontal Reflexion of the Matrix_____',0
+    str_t7_sub DB '__Step 7 : Vertical Reflexion of the Matrix___',0
 
-    ; Each subtitle string uses underscores to form a decorative border
-    str_t1_sub   DB '__________________Matrix__________________',0
-    str_t2_sub   DB '__________Step 1: Matrix Data Cleaning________',0
-    str_t3_sub   DB '________Step 2: Matrix Data Normalization______',0
-    str_t4_sub   DB '________Step 3: Matrix Reduction on Rows______',0
-    str_t5_sub   DB '__Step 4: Matrix Reduction on Rows and Columns_',0
-    str_t6_sub   DB '_______Horizontal Reflexion of the Matrix_____',0
-    str_t7_sub   DB '_______Vertical Reflexion of the Matrix_______',0
+    ; Day and month name tables for the date display.
+    ; Each entry is exactly 3 bytes, so to get entry N we just do: base + N*3
+    day_names   DB 'Sun','Mon','Tue','Wed','Thu','Fri','Sat'
+    month_names DB 'Jan','Feb','Mar','Apr','May','Jun'
+                DB 'Jul','Aug','Sep','Oct','Nov','Dec'
 
-    ;--- Task execution sequence: 16 entries, values 1-7 ------------------
-    ; Lesson 1 twice (tasks 1-5, 1-5) then Lesson 2 three times (6-7, 6-7, 6-7)
-    task_sequence  DB 1,2,3,4,5, 1,2,3,4,5, 6,7,6,7,6,7
-    TOTAL_TASKS    EQU 16
-
-    ;--- Runtime state variables -------------------------------------------
-    task_index   DB 0     ; current position in task_sequence (0..15)
-    task_flag    DB 0     ; 1 = ISR signalled "run the next task now"
-    tick_count   DW 0     ; ticks elapsed since the last task was triggered
-    old_1ch_off  DW 0     ; saved INT 1Ch vector - offset
-    old_1ch_seg  DW 0     ; saved INT 1Ch vector - segment
-
-    TICKS_30SEC  EQU 18  ; 18.2 ticks/sec * 30 sec ≈ 546
-
-    ;--- Day and month name tables (3 bytes per entry, no separators) ------
-    day_names    DB 'Sun','Mon','Tue','Wed','Thu','Fri','Sat'
-    month_names  DB 'Jan','Feb','Mar','Apr','May','Jun'
-                 DB 'Jul','Aug','Sep','Oct','Nov','Dec'
-
-    ;--- Date/time scratch storage (populated once per PrintDateTime call) -
-    dt_dow  DB 0
-    dt_day  DB 0
-    dt_mon  DB 0
-    dt_year DW 0
+    ; PrintDateTime reads the system date/time into these variables first,
+    ; then prints from them. This avoids register corruption between INT calls.
+    dt_dow  DB 0   ; day of week  (0=Sunday .. 6=Saturday)
+    dt_day  DB 0   ; day of month (1-31)
+    dt_mon  DB 0   ; month        (1-12)
+    dt_year DW 0   ; full year    (e.g. 2026) - needs a word, not a byte
     dt_hour DB 0
     dt_min  DB 0
     dt_sec  DB 0
 
-ENDS _DATA
+    ; this section is for the wait30sec 
+    tick_counter  DW 546      ; 91 = 5sec  , 546 = 30sec  . for tests
+    old_1ch_off   DW 0
+    old_1ch_seg   DW 0
+
+
+    ; this section is for the supplement segment 
+    total_sum     DB 0
+    str_ext_title DB 'EXTENSION : Conditional Task Execution',0
+    str_sum_label DB 'Total matrix sum = ',0
+    str_ext_run   DB 'Sum >= 10 : Running Tasks 6 and 7 again...',0
+    str_ext_skip  DB 'Sum < 10  : Tasks 6 and 7 skipped.',0
 
 ;===========================================================================
-; CODE SEGMENT
+; CODE SEGMENT  -  all procedures go here
 ;===========================================================================
-SEGMENT _TEXT
+.CODE 
 
-    ASSUME CS:_TEXT, DS:_DATA, ES:_DATA
+;---------------------------------------------------------------------------
+; MAIN
+;---------------------------------------------------------------------------
+MAIN PROC
 
-;===========================================================================
-; INT 1Ch INTERRUPT HANDLER  (Timer1Ch_Handler)
-;
-; Called automatically ~18.2 times/second (chained from INT 08h).
-; Counts ticks; when TICKS_30SEC is reached it sets task_flag and resets
-; the counter, signalling the main loop to dispatch the next task.
-;
-; Design rule: do only the minimum necessary here (increment + compare).
-; All display work is deferred to the main loop to keep the ISR short.
-; Registers: AX and DS are the only ones touched; both are saved/restored.
-;===========================================================================
-PROC Timer1Ch_Handler
-
-    PUSH AX
-    PUSH DS
-
-    MOV  AX, _DATA         ; ISR must initialise its own DS
+    ; Point DS and ES to our data segment.
+    ; We can't write  MOV DS, immediate  directly (8086 rule),
+    ; so we go through AX as a middleman.
+    ; SEG original_matrix gives the segment address where our data lives.
+    MOV  AX, SEG original_matrix
     MOV  DS, AX
+    MOV  ES, AX   ; ES must also point to data because STOSB writes to ES:DI
 
-    INC  [tick_count]       ; count this hardware tick
+    MOV CX,2
+lesson1Loop:
+    PUSH CX                 ; the interruption function will use cx , so to prevent the loss of it 
+                            ; we need to store it in the stack in each loop
+    CALL Task1_DisplayOriginal
+    CALL Wait30Sec
 
-    CMP  [tick_count], TICKS_30SEC
-    JB   @@ISR_exit         ; 30 seconds not yet elapsed
+    CALL Task2_CleanMatrix
+    CALL Wait30Sec
 
-    MOV  [tick_count], 0   ; reset tick counter for next interval
-    MOV  [task_flag],  1   ; signal main loop: time to run next task
+    CALL Task3_NormalizeMatrix
+    CALL Wait30Sec
 
-@@ISR_exit:
-    POP  DS
-    POP  AX
-    IRET                    ; restores CS:IP and FLAGS for the interrupted code
+    CALL Task4_RowReduction      
+    CALL Wait30Sec
 
-ENDP Timer1Ch_Handler
+    CALL Task5_ColReduction
+    CALL Wait30Sec
 
-;===========================================================================
-; MAIN  -  program entry point
-;
-; Sequence:
-;   1. Initialise data segment registers
-;   2. Pre-build derived matrices (cleaned, normalized, reflect copy)
-;   3. Save current INT 1Ch vector and install our custom handler
-;   4. Main wait loop: idle until ISR sets task_flag, then dispatch task
-;   5. After all 16 tasks: restore INT 1Ch vector and exit
-;===========================================================================
-PROC MAIN
+    POP CX
+    LOOP lesson1Loop
 
-    ;--- Initialise segment registers --------------------------------------
-    MOV  AX, _DATA
-    MOV  DS, AX
-    MOV  ES, AX             ; ES=DS is required by STOSB in build helpers
+    MOV CX, 3
+lesson2Loop:
+    PUSH CX
 
-    ;--- Pre-build all derived matrices once (no screen output) ------------
-    CALL BuildCleanedMatrix      ; original  -> cleaned  (replaces non-digits with '0')
-    CALL BuildNormalizedMatrix   ; cleaned   -> normalized (maps digits to '0'/'1')
-    CALL BuildReflectMatrix      ; normalized-> reflect  (initial copy for Tasks 6&7)
+    CALL Task6_HorizReflect
+    CALL Wait30Sec
 
-    ;--- Save the current INT 1Ch vector: INT 21h / AH=35h -----------------
-    MOV  AH, 35h
-    MOV  AL, 1Ch
-    INT  21h                ; returns ES=segment  BX=offset of current handler
-    MOV  [old_1ch_off], BX
-    MOV  [old_1ch_seg], ES
-    MOV  AX, _DATA          ; restore AX/_DATA (clobbered by INT 21h)
-    MOV  ES, AX             ; restore ES = DS (INT 21h changed ES above)
+    CALL Task7_VertReflect
+    CALL Wait30Sec
 
-    ;--- Install our INT 1Ch handler: INT 21h / AH=25h ---------------------
-    CLI                     ; disable interrupts while modifying the IVT
-    MOV  AH, 25h
-    MOV  AL, 1Ch
-    MOV  DX, OFFSET Timer1Ch_Handler
-    INT  21h                ; DS:DX = address of new handler
-    STI                     ; re-enable interrupts
+    POP CX
+    LOOP lesson2Loop
 
-    ;--- Main idle loop: waits for ISR to set task_flag --------------------
-@@MainLoop:
-    CMP  [task_flag], 0
-    JE   @@MainLoop         ; spin until 30-second timer fires
+    ; the supplement task
+    CALL ComputeTotalSum
+    CALL RunExtension
 
-    MOV  [task_flag], 0     ; clear flag before dispatching (avoid re-entry)
-
-    ;--- Dispatch the correct task using the sequence lookup table ---------
-    MOV  BL, [task_index]   ; BL = current step index (0..15)
-    MOV  BH, 0
-    MOV  AL, [task_sequence+BX]  ; AL = task number (1..7)
-
-    ; Dispatch table via cascaded comparisons
-    CMP  AL, 1
-    JE   @@DoT1
-    CMP  AL, 2
-    JE   @@DoT2
-    CMP  AL, 3
-    JE   @@DoT3
-    CMP  AL, 4
-    JE   @@DoT4
-    CMP  AL, 5
-    JE   @@DoT5
-    CMP  AL, 6
-    JE   @@DoT6
-    JMP  @@DoT7              ; AL must be 7 here
-
-@@DoT1: CALL Task1_DisplayOriginal   
-    JMP @@AfterTask
-@@DoT2: CALL Task2_CleanMatrix       
-    JMP @@AfterTask
-@@DoT3: CALL Task3_NormalizeMatrix   
-    JMP @@AfterTask
-@@DoT4: CALL Task4_RowReduction      
-    JMP @@AfterTask
-@@DoT5: CALL Task5_ColReduction      
-    JMP @@AfterTask
-@@DoT6: CALL Task6_HorizReflect      
-    JMP @@AfterTask
-@@DoT7: CALL Task7_VertReflect
-
-@@AfterTask:
-    INC  [task_index]
-    CMP  [task_index], TOTAL_TASKS
-    JB   @@MainLoop          ; more tasks remain, keep looping
-
-    ;--- All 16 tasks completed: restore INT 1Ch and exit cleanly ----------
-    CLI
-    MOV  AH, 25h
-    MOV  AL, 1Ch
-    PUSH DS
-    MOV  DX, [old_1ch_off]
-    MOV  AX, [old_1ch_seg]
-    MOV  DS, AX
-    INT  21h                 ; restore the original INT 1Ch vector
-    POP  DS
-    STI
-
-    MOV  AH, 4Ch             ; DOS terminate program
-    MOV  AL, 0               ; exit code 0 = success
+    MOV  AH, 4Ch  ; DOS function: terminate program
+    MOV  AL, 00h  ; exit code 0 (no error)
     INT  21h
 
-ENDP MAIN
+MAIN ENDP
+
+
 
 ;===========================================================================
-; BUILD HELPERS
-; These procedures silently populate the derived matrices at startup.
-; They are also called again inside individual Task procedures to ensure
-; the displayed data is always consistent with the current matrix state.
-; All registers are fully saved and restored (caller-transparent).
+; Wait30Sec  -  waits approximately 30 seconds using INT 1Ch
+;
+; How it works:
+;   INT 1Ch is a software interrupt that the BIOS timer fires automatically
+;   18.2 times per second (every ~55ms). By default it does nothing, so we
+;   can safely hijack it for our own timing.
+;
+;   18.2 ticks/sec x 30 sec = 546 ticks = 30 seconds
+;
+;   The procedure:
+;     1. Saves the original INT 1Ch vector (whatever was there before us)
+;     2. Installs our own handler TIMER_TICK as the new INT 1Ch handler
+;     3. Sets tick_counter to 546
+;     4. Sits in an empty loop doing nothing until tick_counter reaches 0
+;        (TIMER_TICK decrements it on every tick)
+;     5. Restores the original INT 1Ch vector and returns
+;
+; Usage in MAIN  (replace every  MOV AH,00h / INT 16h  with this):
+;
+;     CALL Task1_DisplayOriginal
+;     CALL Wait30Sec
+;
+;     CALL Task2_CleanMatrix
+;     CALL Wait30Sec
+;     ... and so on
+;
+; Data to add in .DATA:
+;     tick_counter  DW 546
+;     old_1ch_off   DW 0
+;     old_1ch_seg   DW 0
 ;===========================================================================
 
 ;---------------------------------------------------------------------------
-; BuildCleanedMatrix
-; Copies original_matrix to cleaned_matrix.
-; Every non-digit character (ASCII < '0' or > '9') is replaced with '0'.
+; TIMER_TICK  -  the INT 1Ch handler
+;
+; Called automatically by the BIOS ~18.2 times per second.
+; All it does is decrement tick_counter.
+; IRET is mandatory at the end of any interrupt handler -- it restores
+; the flags register in addition to CS:IP, which a normal RET does not.
+;
+; IMPORTANT: this procedure must be defined BEFORE Wait30Sec in the source
+; file so that OFFSET TIMER_TICK resolves correctly at assembly time.
 ;---------------------------------------------------------------------------
-PROC BuildCleanedMatrix
+TIMER_TICK PROC
+
     PUSH AX
+    PUSH DS
+
+    ; The handler runs with whatever DS the interrupted code had,
+    ; so we must reload DS ourselves to access our own variables.
+    MOV  AX, SEG tick_counter
+    MOV  DS, AX
+
+    DEC  tick_counter          ; one tick closer to zero
+
+    POP  DS
+    POP  AX
+    IRET                       ; return from interrupt (restores CS:IP + FLAGS)
+
+TIMER_TICK ENDP
+
+;---------------------------------------------------------------------------
+; Wait30Sec  -  waits ~30 seconds then returns
+; All registers preserved.
+;---------------------------------------------------------------------------
+Wait30Sec PROC
+
+    PUSH AX
+    PUSH BX
+    PUSH DX
+    PUSH DS
+    PUSH ES
+
+    ; --- reset the counter to 546 before each wait ---
+    ; (so every call waits a fresh 30 seconds)
+    MOV  tick_counter, 546          ; old value is 546 = 30 sec  
+
+    ; --- save the current INT 1Ch vector (INT 21h / AH=35h) ---
+    ; Returns: ES = segment of current handler, BX = offset
+    MOV  AH, 35h
+    MOV  AL, 1Ch
+    INT  21h
+    MOV  old_1ch_off, BX
+    MOV  old_1ch_seg, ES
+
+    ; restore ES to our data segment (INT 21h changed it)
+    MOV  AX, SEG tick_counter
+    MOV  ES, AX
+
+    ; --- install TIMER_TICK as the new INT 1Ch handler (INT 21h / AH=25h) ---
+    ; DS:DX must point to the new handler.
+    ; TIMER_TICK is in the code segment, so we temporarily point DS to CS.
+    PUSH DS
+    MOV  AX, CS
+    MOV  DS, AX
+    MOV  DX, OFFSET TIMER_TICK
+    MOV  AH, 25h
+    MOV  AL, 1Ch
+    INT  21h
+    POP  DS                    ; restore DS back to our data segment
+
+    ; --- wait loop: do nothing until TIMER_TICK counts down to 0 ---
+WaitLoop:
+    CMP  tick_counter, 0
+    JG   WaitLoop              ; JG = jump if greater than zero (signed)
+
+    ; --- restore the original INT 1Ch vector ---
+    ; DS must point to the segment of the old handler for INT 25h
+    MOV  DX, old_1ch_off
+    MOV  AX, old_1ch_seg
+    PUSH DS
+    MOV  DS, AX
+    MOV  AH, 25h
+    MOV  AL, 1Ch
+    INT  21h
+    POP  DS
+
+    POP  ES
+    POP  DS
+    POP  DX
+    POP  BX
+    POP  AX
+    RET
+
+Wait30Sec ENDP
+
+
+
+
+;===========================================================================
+; TASK 1  -  Display original matrix
+;   Loops over every cell. Digits get printed in white, everything else red.
+;===========================================================================
+Task1_DisplayOriginal PROC
+
+    ; Save all registers we use so the caller gets them back unchanged
+    PUSH AX
+    PUSH BX
     PUSH CX
+    PUSH DX
     PUSH SI
-    PUSH DI
 
-    LEA  SI, [original_matrix]
-    LEA  DI, [cleaned_matrix]
-    MOV  CX, TOTAL_CELLS
+    CALL ClearScreen
 
-@@BCM_loop:
-    LODSB                   ; AL = next character from original matrix
+    ; Print date/time on row 0, title on row 1, subtitle on row 2
+    MOV  DH, 0
+    MOV  DL, 1
+    CALL SetCursorPos
+    CALL PrintDateTime
+
+    MOV  DH, 1
+    MOV  DL, 10
+    CALL SetCursorPos
+    LEA  SI, str_header   ; LEA loads the ADDRESS of str_header into SI
+    CALL PrintString      ; (not the value at that address)
+
+    MOV  DH, 2
+    MOV  DL, 5
+    CALL SetCursorPos
+    LEA  SI, str_t1_sub
+    CALL PrintString
+
+    ; Start printing the matrix at screen row 4
+    MOV  DH, 4
+    LEA  SI, original_matrix   ; SI now points to the first byte of the matrix
+    MOV  CX, ROWS              ; outer loop counter = 4 rows
+
+T1RowLoop:
+    PUSH CX          ; save row counter because the inner loop overwrites CX
+    MOV  DL, 18      ; start each row at column 18 (roughly centered)
+    CALL SetCursorPos
+    MOV  CX, COLS    ; inner loop counter = 7 columns
+
+T1ColLoop:
+    LODSB   ; loads byte at DS:SI into AL, then increments SI automatically
+            ; so each call reads the next cell of the matrix
+
+    ; Check if AL is between '0' (ASCII 48) and '9' (ASCII 57)
     CMP  AL, '0'
-    JB   @@BCM_replace      ; below '0' -> not a digit
+    JB   T1NotDigit   ; JB = jump if below (unsigned less-than)
     CMP  AL, '9'
-    JA   @@BCM_replace      ; above '9' -> not a digit
-    STOSB                   ; digit: copy as-is
-    JMP  @@BCM_next
-@@BCM_replace:
-    MOV  AL, '0'
-    STOSB                   ; non-digit: store '0'
-@@BCM_next:
-    LOOP @@BCM_loop
+    JA   T1NotDigit   ; JA = jump if above (unsigned greater-than)
+    MOV  BL, WHITE_ON_BLACK
+    JMP  T1Print
 
-    POP  DI
+T1NotDigit:
+    MOV  BL, RED_ON_BLACK
+
+T1Print:
+    CALL DisplayColorChar   ; prints AL with color BL, then moves cursor right
+    MOV  AL, ' '
+    MOV  BL, WHITE_ON_BLACK
+    CALL DisplayColorChar   ; print a space to separate cells visually
+
+    LOOP T1ColLoop   ; decrements CX, jumps back if CX != 0
+
+    INC  DH    ; move down to the next screen row
+    POP  CX    ; restore the row counter we saved at the top
+    LOOP T1RowLoop
+
     POP  SI
+    POP  DX
     POP  CX
+    POP  BX
     POP  AX
     RET
-ENDP BuildCleanedMatrix
 
-;---------------------------------------------------------------------------
-; BuildNormalizedMatrix
-; Copies cleaned_matrix to normalized_matrix.
-; Digit < '5' -> store '0';  digit >= '5' -> store '1'.
-;---------------------------------------------------------------------------
-PROC BuildNormalizedMatrix
+Task1_DisplayOriginal ENDP
+
+;===========================================================================
+; TASK 2  -  Clean matrix
+;   First pass: copy original -> cleaned, replacing non-digits with '0'.
+;   Second pass: display the cleaned matrix (via DisplayT2Matrix).
+;===========================================================================
+Task2_CleanMatrix PROC
+
     PUSH AX
+    PUSH BX
     PUSH CX
+    PUSH DX
     PUSH SI
     PUSH DI
 
-    LEA  SI, [cleaned_matrix]
-    LEA  DI, [normalized_matrix]
-    MOV  CX, TOTAL_CELLS
+    ; Set SI to read from original_matrix, DI to write to cleaned_matrix
+    LEA  SI, original_matrix
+    LEA  DI, cleaned_matrix
+    MOV  CX, TOTAL_CELLS   ; we process all 28 cells in one flat loop
 
-@@BNM_loop:
-    LODSB
-    SUB  AL, '0'            ; convert ASCII digit to numeric value (0..9)
-    CMP  AL, 5
-    JAE  @@BNM_one          ; >= 5 -> normalize to 1
+T2CleanLoop:
+    LODSB          ; AL = next byte from original_matrix, SI++
+    CMP  AL, '0'
+    JB   T2Replace
+    CMP  AL, '9'
+    JA   T2Replace
+    STOSB          ; STOSB stores AL into ES:DI, then increments DI
+                   ; digit is fine, keep it as-is
+    JMP  T2Next
+
+T2Replace:
     MOV  AL, '0'
-    JMP  @@BNM_store
-@@BNM_one:
-    MOV  AL, '1'
-@@BNM_store:
-    STOSB
-    LOOP @@BNM_loop
+    STOSB          ; overwrite the non-digit with character '0'
+
+T2Next:
+    LOOP T2CleanLoop
+
+    CALL DisplayT2Matrix   ; show the result on screen
 
     POP  DI
     POP  SI
+    POP  DX
     POP  CX
+    POP  BX
     POP  AX
     RET
-ENDP BuildNormalizedMatrix
+
+Task2_CleanMatrix ENDP
 
 ;---------------------------------------------------------------------------
-; BuildReflectMatrix
-; Copies normalized_matrix to reflect_matrix.
-; Called at the start of Task 6 to reset the working copy before each
-; T6-T7 lesson-2 pair, so every pair starts from the normalized state.
+; DisplayT2Matrix
+;   Walks original_matrix and cleaned_matrix side by side.
+;   If a cell changed (original != cleaned), it was replaced -> print RED.
+;   If it stayed the same, it was already a digit -> print WHITE.
 ;---------------------------------------------------------------------------
-PROC BuildReflectMatrix
-    PUSH AX
-    PUSH CX
-    PUSH SI
-    PUSH DI
+DisplayT2Matrix PROC
 
-    LEA  SI, [normalized_matrix]
-    LEA  DI, [reflect_matrix]
-    MOV  CX, TOTAL_CELLS
-
-@@BRM_loop:
-    LODSB
-    STOSB
-    LOOP @@BRM_loop
-
-    POP  DI
-    POP  SI
-    POP  CX
-    POP  AX
-    RET
-ENDP BuildReflectMatrix
-
-;===========================================================================
-; PrintHeader
-;
-; Clears the screen, then prints:
-;   Row 0, col  1 : current date and time
-;   Row 1, col 10 : lesson title   (SI = pointer to null-terminated string)
-;   Row 2, col  5 : task subtitle  (DI = pointer to null-terminated string)
-;
-; Called by every Task procedure before displaying matrix data.
-; On return DH = 2 (the subtitle row); caller increments DH as needed
-; to position subsequent matrix rows starting at row 4.
-;
-; Registers modified: DH (caller uses it); all others preserved.
-;===========================================================================
-PROC PrintHeader
     PUSH AX
     PUSH BX
     PUSH CX
@@ -377,155 +428,62 @@ PROC PrintHeader
 
     CALL ClearScreen
 
-    ;-- Line 0: date and time at left margin ------
     MOV  DH, 0
     MOV  DL, 1
     CALL SetCursorPos
     CALL PrintDateTime
 
-    ;-- Line 1: lesson title centred --------------
     MOV  DH, 1
     MOV  DL, 10
     CALL SetCursorPos
-    CALL PrintString          ; SI still points to the title string
+    LEA  SI, str_header
+    CALL PrintString
 
-    ;-- Line 2: task subtitle ---------------------
     MOV  DH, 2
     MOV  DL, 5
     CALL SetCursorPos
-    MOV  SI, DI               ; DI carries the subtitle pointer; move into SI
+    LEA  SI, str_t2_sub
     CALL PrintString
 
-    POP  DI
-    POP  SI
-    POP  DX
-    POP  CX
-    POP  BX
-    POP  AX
-    RET
-ENDP PrintHeader
-
-;===========================================================================
-; TASK 1  -  Display the original matrix
-;
-; Iterates original_matrix. Digits are printed WHITE; non-digits RED.
-; This visually flags the "dirty" cells before cleaning takes place.
-; The cleaned/normalized matrices are NOT modified here.
-;===========================================================================
-PROC Task1_DisplayOriginal
-    PUSH AX
-    PUSH BX
-    PUSH CX
-    PUSH DX
-    PUSH SI
-    PUSH DI
-
-    LEA  SI, [str_preproc]
-    LEA  DI, [str_t1_sub]
-    CALL PrintHeader
-
-    MOV  DH, 4                ; matrix display starts at screen row 4
-    LEA  SI, [original_matrix]
-    MOV  BH, ROWS             ; BH = row counter (CX is used by inner LOOP)
-
-@@T1_row:
-    MOV  DL, 18               ; column 18: centre the matrix on an 80-col screen
-    CALL SetCursorPos
-    MOV  CX, COLS
-
-@@T1_col:
-    LODSB                     ; AL = current matrix element
-    PUSH CX                   ; protect CX from DisplayColorChar
-
-    CMP  AL, '0'
-    JB   @@T1_red             ; below digit range -> highlight red
-    CMP  AL, '9'
-    JA   @@T1_red             ; above digit range -> highlight red
-    MOV  BL, WHITE_ON_BLACK
-    JMP  @@T1_print
-@@T1_red:
-    MOV  BL, RED_ON_BLACK
-@@T1_print:
-    CALL DisplayColorChar     ; print the matrix cell with chosen colour
-    MOV  AL, ' '              ; inter-cell space in white
-    MOV  BL, WHITE_ON_BLACK
-    CALL DisplayColorChar
-
-    POP  CX
-    LOOP @@T1_col
-
-    INC  DH                   ; next screen row
-    DEC  BH
-    JNZ  @@T1_row
-
-    POP  DI
-    POP  SI
-    POP  DX
-    POP  CX
-    POP  BX
-    POP  AX
-    RET
-ENDP Task1_DisplayOriginal
-
-;===========================================================================
-; TASK 2  -  Clean matrix display
-;
-; Rebuilds cleaned_matrix (non-digit -> '0'), then displays it.
-; Cells that were replaced appear RED to show which values were cleaned;
-; cells that were already digits appear WHITE (unchanged from original).
-;
-; Technique: walk original_matrix and cleaned_matrix in parallel.
-; If original != cleaned at a position, it was replaced -> colour RED.
-;===========================================================================
-PROC Task2_CleanMatrix
-    PUSH AX
-    PUSH BX
-    PUSH CX
-    PUSH DX
-    PUSH SI
-    PUSH DI
-
-    CALL BuildCleanedMatrix    ; refresh cleaned_matrix from current original
-
-    LEA  SI, [str_preproc]
-    LEA  DI, [str_t2_sub]
-    CALL PrintHeader
-
     MOV  DH, 4
-    LEA  SI, [original_matrix] ; SI: original  (to detect which cells changed)
-    LEA  DI, [cleaned_matrix]  ; DI: cleaned   (actual values to print)
+    LEA  SI, original_matrix
+    LEA  DI, cleaned_matrix
+    ; We use BH as the outer row counter instead of CX
+    ; because the inner LOOP instruction needs CX for itself
     MOV  BH, ROWS
 
-@@T2_row:
+T2DispRow:
     MOV  DL, 18
     CALL SetCursorPos
     MOV  CX, COLS
 
-@@T2_col:
-    PUSH CX
-    MOV  AH, [SI]              ; AH = original character
+T2DispCol:
+    PUSH CX            ; protect CX from being changed by CALL instructions
+    MOV  AH, [SI]      ; read original char into AH
     INC  SI
-    MOV  AL, [DI]              ; AL = cleaned character (printed value)
+    MOV  AL, [DI]      ; read cleaned char into AL
     INC  DI
 
-    CMP  AL, AH                ; if equal: was already a digit -> white
-    JE   @@T2_white
-    MOV  BL, RED_ON_BLACK      ; not equal: was replaced -> red
-    JMP  @@T2_print
-@@T2_white:
+    ; If original == cleaned, the cell was already a digit, no change needed
+    CMP  AL, AH
+    JE   T2White
+    MOV  BL, RED_ON_BLACK    ; they differ, meaning this '0' was substituted
+    JMP  T2Print
+
+T2White:
     MOV  BL, WHITE_ON_BLACK
-@@T2_print:
+
+T2Print:
     CALL DisplayColorChar
     MOV  AL, ' '
     MOV  BL, WHITE_ON_BLACK
     CALL DisplayColorChar
-
     POP  CX
-    LOOP @@T2_col
+    LOOP T2DispCol
 
     INC  DH
-    DEC  BH
-    JNZ  @@T2_row
+    DEC  BH        ; manually decrement our outer row counter
+    JNZ  T2DispRow ; JNZ = jump if not zero (BH still has rows left)
 
     POP  DI
     POP  SI
@@ -534,17 +492,16 @@ PROC Task2_CleanMatrix
     POP  BX
     POP  AX
     RET
-ENDP Task2_CleanMatrix
+
+DisplayT2Matrix ENDP
 
 ;===========================================================================
-; TASK 3  -  Normalize matrix display
-;
-; Rebuilds normalized_matrix (digit<5->'0', digit>=5->'1') from the
-; cleaned matrix, then rebuilds reflect_matrix (so Tasks 6&7 always
-; start from the freshest normalized state).
-; All cells displayed WHITE.
+; TASK 3  -  Normalize matrix
+;   Reads from cleaned_matrix, writes to normalized_matrix.
+;   Rule: digit value < 5 -> store '0',  digit value >= 5 -> store '1'
 ;===========================================================================
-PROC Task3_NormalizeMatrix
+Task3_NormalizeMatrix PROC
+
     PUSH AX
     PUSH BX
     PUSH CX
@@ -552,23 +509,77 @@ PROC Task3_NormalizeMatrix
     PUSH SI
     PUSH DI
 
-    CALL BuildNormalizedMatrix  ; refresh normalized_matrix
-    CALL BuildReflectMatrix     ; keep reflect_matrix in sync for Lesson 2
+    LEA  SI, cleaned_matrix
+    LEA  DI, normalized_matrix
+    MOV  CX, TOTAL_CELLS
 
-    LEA  SI, [str_preproc]
-    LEA  DI, [str_t3_sub]
-    CALL PrintHeader
+T3NormLoop:
+    LODSB              ; AL = next ASCII digit from cleaned_matrix
+    SUB  AL, '0'       ; convert ASCII to numeric: '0'->0, '5'->5, '9'->9
+    CMP  AL, 5
+    JAE  T3SetOne      ; JAE = jump if above or equal (i.e. value >= 5)
+    MOV  AL, '0'       ; value was 0-4, store ASCII '0'
+    JMP  T3Store
+
+T3SetOne:
+    MOV  AL, '1'       ; value was 5-9, store ASCII '1'
+
+T3Store:
+    STOSB              ; write AL to normalized_matrix at ES:DI, DI++
+    LOOP T3NormLoop
+
+    CALL DisplayT3Matrix
+
+    POP  DI
+    POP  SI
+    POP  DX
+    POP  CX
+    POP  BX
+    POP  AX
+    RET
+
+Task3_NormalizeMatrix ENDP
+
+;---------------------------------------------------------------------------
+; DisplayT3Matrix  -  shows normalized_matrix, all cells in white
+;---------------------------------------------------------------------------
+DisplayT3Matrix PROC
+
+    PUSH AX
+    PUSH BX
+    PUSH CX
+    PUSH DX
+    PUSH SI
+
+    CALL ClearScreen
+
+    MOV  DH, 0
+    MOV  DL, 1
+    CALL SetCursorPos
+    CALL PrintDateTime
+
+    MOV  DH, 1
+    MOV  DL, 10
+    CALL SetCursorPos
+    LEA  SI, str_header
+    CALL PrintString
+
+    MOV  DH, 2
+    MOV  DL, 5
+    CALL SetCursorPos
+    LEA  SI, str_t3_sub
+    CALL PrintString
 
     MOV  DH, 4
-    LEA  SI, [normalized_matrix]
+    LEA  SI, normalized_matrix
     MOV  BH, ROWS
 
-@@T3_row:
+T3DispRow:
     MOV  DL, 18
     CALL SetCursorPos
     MOV  CX, COLS
 
-@@T3_col:
+T3DispCol:
     LODSB
     PUSH CX
     MOV  BL, WHITE_ON_BLACK
@@ -576,196 +587,271 @@ PROC Task3_NormalizeMatrix
     MOV  AL, ' '
     CALL DisplayColorChar
     POP  CX
-    LOOP @@T3_col
+    LOOP T3DispCol
 
     INC  DH
     DEC  BH
-    JNZ  @@T3_row
+    JNZ  T3DispRow
 
-    POP  DI
     POP  SI
     POP  DX
     POP  CX
     POP  BX
     POP  AX
     RET
-ENDP Task3_NormalizeMatrix
+
+DisplayT3Matrix ENDP
+
+
 
 ;===========================================================================
-; TASK 4  -  Row sum reduction
+; Task 4  -  Row sum reduction
 ;
-; Displays normalized_matrix with each row's sum appended in GREEN.
-; Sum is computed inline while printing; stored in memory variable row_sum
-; to avoid conflicts between CH (sum scratch) and the CX LOOP counter.
+; Displays normalized_matrix (4 rows x 7 cols of '0'/'1') with each row's
+; sum printed in GREEN to the right of that row.
+;
+; The sum for each row = number of 1s in that row (max 7, fits in one digit).
+;
+; Design note:
+;   The actual row-display logic lives in a separate helper called
+;   DisplayRowSums. Task 5 will call that same helper, then add the
+;   column sums below it, so there is no code duplication between tasks.
+;
+; Plug-in: same structure as Tasks 1-3. Just add these two procedures
+; to the existing file and call Task4_RowReduction from MAIN.
 ;===========================================================================
-PROC Task4_RowReduction
+
+;---------------------------------------------------------------------------
+; Task4_RowReduction
+;   Entry point called from MAIN. Clears screen, prints the header,
+;   then delegates the matrix+sums display to DisplayRowSums.
+;---------------------------------------------------------------------------
+Task4_RowReduction PROC
+
     PUSH AX
     PUSH BX
     PUSH CX
     PUSH DX
     PUSH SI
-    PUSH DI
 
-    LEA  SI, [str_preproc]
-    LEA  DI, [str_t4_sub]
-    CALL PrintHeader
+    CALL ClearScreen
 
-    MOV  DH, 4
-    LEA  SI, [normalized_matrix]
-    MOV  BH, ROWS
-
-@@T4_row:
-    MOV  DL, 18
+    ; --- date/time on row 0 ---
+    MOV  DH, 0
+    MOV  DL, 1
     CALL SetCursorPos
-    MOV  CX, COLS
-    MOV  [row_sum], 0          ; reset running sum for this row
+    CALL PrintDateTime
 
-@@T4_col:
-    LODSB                      ; AL = '0' or '1'
-    PUSH CX
-    MOV  AH, AL                ; save char value; DisplayColorChar will modify AL
-    MOV  BL, WHITE_ON_BLACK
-    CALL DisplayColorChar      ; print the cell
-    MOV  AL, ' '
-    CALL DisplayColorChar      ; inter-cell space
+    ; --- title on row 1 ---
+    MOV  DH, 1
+    MOV  DL, 10
+    CALL SetCursorPos
+    LEA  SI, str_header
+    CALL PrintString
 
-    MOV  AL, AH                ; recover cell value
-    SUB  AL, '0'               ; ASCII -> numeric: 0 or 1
-    ADD  [row_sum], AL         ; accumulate
+    ; --- subtitle on row 2 ---
+    MOV  DH, 2
+    MOV  DL, 5
+    CALL SetCursorPos
+    LEA  SI, str_t4_sub
+    CALL PrintString
 
-    POP  CX
-    LOOP @@T4_col
+    ; --- matrix + row sums starting at screen row 4 ---
+    MOV  DH, 4
+    CALL DisplayRowSums   ; DH tells it where to start drawing
 
-    ;-- Print row sum in GREEN at end of row --
-    MOV  AL, ' '
-    MOV  BL, WHITE_ON_BLACK
-    CALL DisplayColorChar      ; separator space before sum
-    MOV  AL, [row_sum]
-    ADD  AL, '0'               ; numeric -> ASCII (sum <= 7, single digit)
-    MOV  BL, GREEN_ON_BLACK
-    CALL DisplayColorChar
-
-    INC  DH
-    DEC  BH
-    JNZ  @@T4_row
-
-    POP  DI
     POP  SI
     POP  DX
     POP  CX
     POP  BX
     POP  AX
     RET
-ENDP Task4_RowReduction
 
-;===========================================================================
-; TASK 5  -  Row + Column sum reduction
+Task4_RowReduction ENDP
+
+;---------------------------------------------------------------------------
+; DisplayRowSums
+;   Draws normalized_matrix row by row in WHITE, then appends each row's
+;   sum in GREEN. Does NOT clear the screen or print the header ??? the caller
+;   handles that. This lets Task 5 reuse it without duplication.
 ;
-; Identical to Task 4 for the row sums (GREEN), plus a row of column
-; sums in YELLOW printed below the matrix.
+;   Input : DH = screen row to start on (caller sets this before calling)
+;   Output: DH = screen row just after the last matrix row  (Task 5 needs
+;           this to know where to print the column sums)
 ;
-; Column sums are accumulated in a separate pass over normalized_matrix
-; before display begins, using explicit row/col counters (DH/DL) instead
-; of the CX LOOP instruction to avoid register conflicts.
-;===========================================================================
-PROC Task5_ColReduction
+;   Register plan:
+;     SI  = pointer walking through normalized_matrix
+;     BH  = outer loop counter (rows remaining)  -- we use BH instead of CX
+;           because the inner LOOP instruction needs CX for the column count
+;     CX  = inner loop counter (columns)
+;     AH  = row sum accumulator for the current row
+;           (we use AH instead of another memory variable to keep it simple;
+;            AL is used for the actual character being printed)
+;---------------------------------------------------------------------------
+DisplayRowSums PROC
+
     PUSH AX
     PUSH BX
     PUSH CX
-    PUSH DX
     PUSH SI
-    PUSH DI
 
-    ;--- Zero the col_sums array before accumulation ----------------------
-    LEA  DI, [col_sums]
-    MOV  CX, COLS
-    MOV  AL, 0
-@@T5_zero:
-    MOV  [DI], AL
-    INC  DI
-    LOOP @@T5_zero
+    ; DH is passed in by the caller
+    LEA  SI, normalized_matrix
+    MOV  BH, ROWS              ; BH counts down from 4 to 0
 
-    ;--- Pass 1: accumulate column sums -----------------------------------
-    ; Use DH (row counter) and DL (col counter) to index;
-    ; BX used as base-relative index into col_sums[].
-    LEA  SI, [normalized_matrix]
-    MOV  DH, ROWS
-
-@@T5_acc_row:
-    MOV  DL, 0                 ; reset column counter for each new row
-@@T5_acc_col:
-    MOV  AL, [SI]
-    SUB  AL, '0'               ; numeric value: 0 or 1
-    MOV  BL, DL                ; BL = column index
-    MOV  BH, 0
-    ADD  [col_sums+BX], AL     ; col_sums[col] += value
-    INC  SI
-    INC  DL
-    CMP  DL, COLS
-    JB   @@T5_acc_col          ; next column in this row
-    DEC  DH
-    JNZ  @@T5_acc_row          ; next row
-
-    ;--- Pass 2: display matrix with row sums (same as Task 4) -----------
-    LEA  SI, [str_preproc]
-    LEA  DI, [str_t5_sub]
-    CALL PrintHeader
-
-    MOV  DH, 4
-    LEA  SI, [normalized_matrix]
-    MOV  BH, ROWS
-
-@@T5_row:
-    MOV  DL, 18
+RowLoop:
+    MOV  DL, 18                ; each row starts at column 18
     CALL SetCursorPos
-    MOV  CX, COLS
-    MOV  [row_sum], 0
 
-@@T5_col:
-    LODSB
-    PUSH CX
-    MOV  AH, AL                ; save char value
+    MOV  CX, COLS              ; 7 columns per row
+    MOV  AH, 0                 ; reset row sum to 0 for this row
+
+ColLoop:
+    LODSB                      ; AL = next cell ('0' or '1'), SI++
+
+    PUSH CX                    ; protect CX from CALL instructions inside
+    PUSH AX                    ; protect AH (our sum) from DisplayColorChar
+
     MOV  BL, WHITE_ON_BLACK
+    CALL DisplayColorChar      ; print the cell character
+
+    MOV  AL, ' '               ; space between cells
     CALL DisplayColorChar
+
+    POP  AX                    ; restore AH (sum) and AL (the cell value)
+    POP  CX
+
+    ; accumulate: AL still holds the character we just printed ('0' or '1')
+    SUB  AL, '0'               ; '0'->0, '1'->1
+    ADD  AH, AL                ; add to row sum (AH stays 0-7, no overflow)
+
+    LOOP ColLoop               ; CX--, jump back if CX != 0
+
+    ; --- print the row sum in GREEN ---
+    ; one space gap before the number
     MOV  AL, ' '
+    MOV  BL, WHITE_ON_BLACK
+    PUSH AX
     CALL DisplayColorChar
+    POP  AX
+
+    ; AH holds the sum (0-7), convert to ASCII and print in green
     MOV  AL, AH
-    SUB  AL, '0'
-    ADD  [row_sum], AL
-    POP  CX
-    LOOP @@T5_col
-
-    ;-- GREEN row sum --
-    MOV  AL, ' '
-    MOV  BL, WHITE_ON_BLACK
-    CALL DisplayColorChar
-    MOV  AL, [row_sum]
-    ADD  AL, '0'
+    ADD  AL, '0'               ; numeric -> ASCII digit
     MOV  BL, GREEN_ON_BLACK
     CALL DisplayColorChar
 
-    INC  DH
-    DEC  BH
-    JNZ  @@T5_row
+    INC  DH                    ; move down one screen row
+    DEC  BH                    ; one fewer matrix row to go
+    JNZ  RowLoop               ; keep going until BH reaches 0
 
-    ;--- Pass 3: display column sums in YELLOW on the row below matrix ----
-    ; DH is now pointing to the first row below the matrix
-    MOV  DL, 18
-    CALL SetCursorPos
-    LEA  SI, [col_sums]
-    MOV  CX, COLS
+    ; DH now points to the row just below the matrix.
+    ; We leave it here so Task 5 can read it after we return.
 
-@@T5_colsum:
-    LODSB                      ; AL = column sum (0..4 for a 4-row binary matrix)
+    POP  SI
+    POP  CX
+    POP  BX
+    POP  AX
+    RET
+
+DisplayRowSums ENDP
+
+;===========================================================================
+; Data to add in the .DATA section:
+;
+;   str_t4_sub  DB '________Step 3: Matrix Reduction on Rows______',0
+;   GREEN_ON_BLACK EQU 0Ah
+;
+; (GREEN_ON_BLACK and str_t4_sub need to be declared alongside the other
+;  color constants and strings already in the .DATA section)
+;===========================================================================
+
+
+
+
+Task5_ColReduction PROC
+
+    PUSH AX
+    PUSH BX
     PUSH CX
-    ADD  AL, '0'               ; numeric -> ASCII
+    PUSH DX
+    PUSH SI
+    PUSH DI
+
+    ; --- Step 1: compute column sums and store in col_sums[] ---
+    ; We walk the matrix column by column.
+    ; For column C, the cells are at offsets: C, C+7, C+14, C+21
+    ; (because each row is 7 bytes wide, stored flat in memory)
+
+    LEA  DI, col_sums          ; DI = pointer into col_sums array
+    MOV  BL, 0                 ; BL = current column index (0..6)
+
+ColSumLoop:
+    ; sum up all ROWS values for this column
+    LEA  SI, normalized_matrix
+    ADD  SI, BX                ; SI now points to row 0 of this column
+                               ; (BX = BL zero-extended = column index)
+    MOV  AH, 0                 ; AH = column sum accumulator
+
+    MOV  CX, ROWS              ; 4 rows to sum
+
+ColSumRowLoop:
+    MOV  AL, [SI]              ; AL = cell value ('0' or '1')
+    SUB  AL, '0'               ; convert ASCII to numeric (0 or 1)
+    ADD  AH, AL                ; accumulate
+    ADD  SI, COLS              ; jump down one row (7 bytes forward)
+    LOOP ColSumRowLoop
+
+    MOV  [DI], AH              ; store the column sum
+    INC  DI                    ; advance to next slot in col_sums
+    INC  BL                    ; next column
+    CMP  BL, COLS              ; done all 7 columns?
+    JB   ColSumLoop
+
+    ; --- Step 2: clear screen and print header ---
+    CALL ClearScreen
+
+    MOV  DH, 0
+    MOV  DL, 1
+    CALL SetCursorPos
+    CALL PrintDateTime
+
+    MOV  DH, 1
+    MOV  DL, 10
+    CALL SetCursorPos
+    LEA  SI, str_header
+    CALL PrintString
+
+    MOV  DH, 2
+    MOV  DL, 5
+    CALL SetCursorPos
+    LEA  SI, str_t5_sub
+    CALL PrintString
+
+    ; --- Step 3: draw the matrix rows + green row sums ---
+    ; DisplayRowSums starts at whatever DH we set, and updates DH
+    ; to point to the row right after the last matrix row when it returns.
+    MOV  DH, 4
+    CALL DisplayRowSums        ; after this, DH = row just below the matrix
+
+    ; --- Step 4: print column sums in YELLOW on the current row ---
+    MOV  DL, 18                ; same left margin as the matrix rows
+    CALL SetCursorPos
+
+    LEA  SI, col_sums
+    MOV  CX, COLS              ; 7 column sums to print
+
+ColSumPrintLoop:
+    LODSB                      ; AL = next column sum value (0..4)
+    PUSH CX
+    ADD  AL, '0'               ; convert to ASCII digit
     MOV  BL, YELLOW_ON_BLACK
-    CALL DisplayColorChar
+    CALL DisplayColorChar      ; print in yellow
     MOV  AL, ' '
     MOV  BL, WHITE_ON_BLACK
-    CALL DisplayColorChar
+    CALL DisplayColorChar      ; space between numbers
     POP  CX
-    LOOP @@T5_colsum
+    LOOP ColSumPrintLoop
 
     POP  DI
     POP  SI
@@ -774,23 +860,48 @@ PROC Task5_ColReduction
     POP  BX
     POP  AX
     RET
-ENDP Task5_ColReduction
+
+Task5_ColReduction ENDP
 
 ;===========================================================================
-; TASK 6  -  Horizontal reflection (flip rows top <-> bottom)
+; Add to .DATA section:
 ;
-; Always begins by resetting reflect_matrix from normalized_matrix, so
-; every T6-T7 pair in Lesson 2 starts from the same baseline state.
+;   col_sums        DB 7 DUP(0)
+;   str_t5_sub      DB '__Step 4: Matrix Reduction on Rows and Columns_',0
+;   YELLOW_ON_BLACK EQU 0Eh
 ;
-; Algorithm:
-;   Two row pointers: SI = first row, DI = last row.
-;   Swap bytes element-by-element across both rows (CX=COLS swaps).
-;   Move SI forward one row, DI backward one row; repeat ROWS/2 times.
+; Add to MAIN after Task 4:
 ;
-; After in-place swapping, displays reflect_matrix (now horizontally
-; flipped).  Task 7 will then further vertically flip this same buffer.
+;   CALL Task5_ColReduction
+;   MOV  AH, 00h
+;   INT  16h
 ;===========================================================================
-PROC Task6_HorizReflect
+
+
+;===========================================================================
+; Task 6  -  Horizontal reflection of the matrix
+;
+; Takes normalized_matrix (produced by Task 3) and flips it upside-down:
+;   row 0  <->  row 3
+;   row 1  <->  row 2
+;
+; The result is stored in reflected_matrix so normalized_matrix stays
+; untouched (Task 7 will also need the original normalized data).
+;
+; Display: "MATRIX PROCESSING" header + subtitle, then the reflected
+; matrix in WHITE, all cells in white (no colors needed here).
+;
+; Data to add in .DATA:
+;   reflected_matrix  DB 28 DUP(0)
+;   str_t6_sub        DB '________Horizontal Reflexion of the Matrix_____',0
+;   str_process       DB 'MATRIX PROCESSING',0
+;===========================================================================
+
+;---------------------------------------------------------------------------
+; Task6_HorizReflect  -  entry point called from MAIN
+;---------------------------------------------------------------------------
+Task6_HorizReflect PROC
+
     PUSH AX
     PUSH BX
     PUSH CX
@@ -798,55 +909,51 @@ PROC Task6_HorizReflect
     PUSH SI
     PUSH DI
 
-    CALL BuildReflectMatrix    ; reset working copy from normalized (each T6 starts fresh)
+    ; --- Step 1: copy normalized_matrix into reflected_matrix ---
+    ; We work on the copy so the original is never touched.
+    LEA  SI, normalized_matrix
+    LEA  DI, reflected_matrix
+    MOV  CX, TOTAL_CELLS
 
-    ;--- Swap rows pairwise: top row <-> bottom row -----------------------
-    LEA  SI, [reflect_matrix]                   ; SI -> row 0 (top)
-    LEA  DI, [reflect_matrix + (ROWS-1)*COLS]   ; DI -> row 3 (bottom)
-    MOV  BH, ROWS/2            ; number of row-pair swaps needed (= 2 for 4 rows)
+CopyLoop:
+    LODSB        ; AL = byte from normalized_matrix, SI++
+    STOSB        ; store AL into reflected_matrix, DI++
+    LOOP CopyLoop
 
-@@T6_swap_pair:
-    MOV  CX, COLS              ; swap all COLS bytes of this pair
-@@T6_swap_byte:
-    MOV  AL, [SI]              ; AL = element from top row
-    MOV  AH, [DI]              ; AH = element from bottom row
-    MOV  [SI], AH              ; top row <- bottom value
-    MOV  [DI], AL              ; bottom row <- top value
+    ; --- Step 2: flip reflected_matrix in-place ---
+    ; Swap row 0 with row 3, then row 1 with row 2.
+    ; For a 4-row matrix that is ROWS/2 = 2 swaps.
+    ;
+    ; SI points to the top row, DI points to the bottom row.
+    ; After each full row swap, SI moves one row down, DI moves one row up.
+
+    LEA  SI, reflected_matrix              ; SI -> start of row 0
+    LEA  DI, reflected_matrix + (ROWS-1)*COLS  ; DI -> start of row 3
+
+    MOV  BH, ROWS/2    ; number of row-pair swaps = 2
+
+SwapRowPair:
+    MOV  CX, COLS      ; swap 7 bytes between the two rows
+
+SwapOneByte:
+    MOV  AL, [SI]      ; AL = byte from top row
+    MOV  AH, [DI]      ; AH = byte from bottom row
+    MOV  [SI], AH      ; top row gets bottom byte
+    MOV  [DI], AL      ; bottom row gets top byte
     INC  SI
     INC  DI
-    LOOP @@T6_swap_byte
-    ; After the loop SI is at the start of the next (inner) top row.
-    ; DI has gone past the bottom row we just swapped; retreat by 2*COLS
-    ; to point to the new inner bottom row.
+    LOOP SwapOneByte
+
+    ; SI is now at start of next row going down.
+    ; DI just passed the row it swapped -- move it back 2 rows to point
+    ; to the next inner row going up.
     SUB  DI, COLS*2
+
     DEC  BH
-    JNZ  @@T6_swap_pair
+    JNZ  SwapRowPair
 
-    ;--- Display the horizontally reflected matrix ------------------------
-    LEA  SI, [str_process]
-    LEA  DI, [str_t6_sub]
-    CALL PrintHeader
-
-    MOV  DH, 4
-    LEA  SI, [reflect_matrix]
-    MOV  BH, ROWS
-
-@@T6_row:
-    MOV  DL, 18
-    CALL SetCursorPos
-    MOV  CX, COLS
-@@T6_col:
-    LODSB
-    PUSH CX
-    MOV  BL, WHITE_ON_BLACK
-    CALL DisplayColorChar
-    MOV  AL, ' '
-    CALL DisplayColorChar
-    POP  CX
-    LOOP @@T6_col
-    INC  DH
-    DEC  BH
-    JNZ  @@T6_row
+    ; --- Step 3: display the reflected matrix ---
+    CALL DisplayReflectedMatrix
 
     POP  DI
     POP  SI
@@ -855,24 +962,118 @@ PROC Task6_HorizReflect
     POP  BX
     POP  AX
     RET
-ENDP Task6_HorizReflect
+
+Task6_HorizReflect ENDP
+
+;---------------------------------------------------------------------------
+; DisplayReflectedMatrix
+;   Clears screen, prints header, then dumps reflected_matrix in WHITE.
+;   Same structure as the display procs in Tasks 1-3.
+;---------------------------------------------------------------------------
+DisplayReflectedMatrix PROC
+
+    PUSH AX
+    PUSH BX
+    PUSH CX
+    PUSH DX
+    PUSH SI
+
+    CALL ClearScreen
+
+    MOV  DH, 0
+    MOV  DL, 1
+    CALL SetCursorPos
+    CALL PrintDateTime
+
+    ; Note: Task 6 uses "MATRIX PROCESSING" not "MATRIX PREPROCESSING"
+    MOV  DH, 1
+    MOV  DL, 10
+    CALL SetCursorPos
+    LEA  SI, str_process
+    CALL PrintString
+
+    MOV  DH, 2
+    MOV  DL, 5
+    CALL SetCursorPos
+    LEA  SI, str_t6_sub
+    CALL PrintString
+
+    MOV  DH, 4
+    LEA  SI, reflected_matrix
+    MOV  BH, ROWS          ; BH = row counter (CX is used by inner LOOP)
+
+T6DispRow:
+    MOV  DL, 18
+    CALL SetCursorPos
+    MOV  CX, COLS
+
+T6DispCol:
+    LODSB
+    PUSH CX
+    MOV  BL, WHITE_ON_BLACK
+    CALL DisplayColorChar
+    MOV  AL, ' '
+    CALL DisplayColorChar
+    POP  CX
+    LOOP T6DispCol
+
+    INC  DH
+    DEC  BH
+    JNZ  T6DispRow
+
+    POP  SI
+    POP  DX
+    POP  CX
+    POP  BX
+    POP  AX
+    RET
+
+DisplayReflectedMatrix ENDP
 
 ;===========================================================================
-; TASK 7  -  Vertical reflection (mirror each row left <-> right)
+; Add to .DATA:
 ;
-; Operates directly on reflect_matrix which Task 6 already flipped
-; horizontally.  This produces the full horizontal+vertical reflection.
+;   reflected_matrix  DB 28 DUP(0)
+;   str_process       DB 'MATRIX PROCESSING',0
+;   str_t6_sub        DB '________Horizontal Reflexion of the Matrix_____',0
 ;
-; Note: BuildReflectMatrix is NOT called here.  Task 6 resets the buffer;
-; Task 7 continues from where Task 6 left off (in-place vertical flip).
+; Add to MAIN after Task 5:
 ;
-; Algorithm per row:
-;   SI = left pointer (start of row)
-;   DI = right pointer (end of row = start + COLS - 1)
-;   Swap SI<->DI, advance SI, retreat DI, repeat COLS/2 times.
-;   (Middle element of an odd-length row is untouched.)
+;   CALL Task6_HorizReflect
+;   MOV  AH, 00h
+;   INT  16h
 ;===========================================================================
-PROC Task7_VertReflect
+
+
+
+
+;===========================================================================
+; Task 7  -  Vertical reflection of the matrix
+;
+; Takes normalized_matrix and mirrors each row left-to-right independently.
+; This means element[col] swaps with element[COLS-1-col] for each row.
+;
+; For 7 columns per row we do 3 swaps per row (middle element stays put):
+;   col 0 <-> col 6
+;   col 1 <-> col 5
+;   col 2 <-> col 4
+;   col 3      (untouched, it is the middle)
+;
+; The result goes into vert_reflected_matrix.
+; normalized_matrix is never modified.
+;
+; Data to add in .DATA:
+;   vert_reflected_matrix  DB 28 DUP(0)
+;   str_t7_sub             DB '_______Vertical Reflexion of the Matrix______',0
+;
+; str_process is already declared for Task 6, reuse it here.
+;===========================================================================
+
+;---------------------------------------------------------------------------
+; Task7_VertReflect  -  entry point called from MAIN
+;---------------------------------------------------------------------------
+Task7_VertReflect PROC
+
     PUSH AX
     PUSH BX
     PUSH CX
@@ -880,54 +1081,49 @@ PROC Task7_VertReflect
     PUSH SI
     PUSH DI
 
-    ;--- Mirror each row in-place -----------------------------------------
-    LEA  BX, [reflect_matrix]  ; BX = base address of current row
-    MOV  DH, ROWS              ; DH = row counter
+    ; --- Step 1: copy normalized_matrix into vert_reflected_matrix ---
+    LEA  SI, normalized_matrix
+    LEA  DI, vert_reflected_matrix
+    MOV  CX, TOTAL_CELLS
 
-@@T7_row:
-    MOV  SI, BX                ; SI = left edge of this row
-    MOV  DI, BX
-    ADD  DI, COLS-1            ; DI = right edge of this row
-    MOV  CX, COLS/2            ; number of element swaps (3 for COLS=7)
-
-@@T7_swap:
-    MOV  AL, [SI]              ; AL = left element
-    MOV  AH, [DI]              ; AH = right element
-    MOV  [SI], AH              ; left  <- right value
-    MOV  [DI], AL              ; right <- left value
-    INC  SI
-    DEC  DI
-    LOOP @@T7_swap
-
-    ADD  BX, COLS              ; advance base pointer to next row
-    DEC  DH
-    JNZ  @@T7_row
-
-    ;--- Display the fully reflected (horiz + vert) matrix ----------------
-    LEA  SI, [str_process]
-    LEA  DI, [str_t7_sub]
-    CALL PrintHeader
-
-    MOV  DH, 4
-    LEA  SI, [reflect_matrix]
-    MOV  BH, ROWS
-
-@@T7_row_disp:
-    MOV  DL, 18
-    CALL SetCursorPos
-    MOV  CX, COLS
-@@T7_col_disp:
+T7CopyLoop:
     LODSB
-    PUSH CX
-    MOV  BL, WHITE_ON_BLACK
-    CALL DisplayColorChar
-    MOV  AL, ' '
-    CALL DisplayColorChar
-    POP  CX
-    LOOP @@T7_col_disp
-    INC  DH
-    DEC  BH
-    JNZ  @@T7_row_disp
+    STOSB
+    LOOP T7CopyLoop
+
+    ; --- Step 2: reverse each row in-place inside vert_reflected_matrix ---
+    ; For each row:
+    ;   SI = pointer to first element of the row  (left side)
+    ;   DI = pointer to last element of the row   (right side)
+    ;   Swap COLS/2 = 3 pairs, then advance both pointers to the next row.
+    ;
+    ; We use BX as a base that tracks the start of the current row.
+
+    LEA  BX, vert_reflected_matrix   ; BX = start of current row
+    MOV  DH, ROWS                    ; DH = rows remaining
+
+T7RowLoop:
+    MOV  SI, BX                      ; SI -> left end of this row
+    MOV  DI, BX
+    ADD  DI, COLS - 1                ; DI -> right end of this row
+
+    MOV  CX, COLS / 2                ; number of swaps per row = 3
+
+T7SwapLoop:
+    MOV  AL, [SI]    ; AL = left element
+    MOV  AH, [DI]    ; AH = right element
+    MOV  [SI], AH    ; put right value on the left
+    MOV  [DI], AL    ; put left value on the right
+    INC  SI          ; move left pointer inward
+    DEC  DI          ; move right pointer inward
+    LOOP T7SwapLoop  ; repeat for all 3 pairs
+
+    ADD  BX, COLS    ; advance BX to the start of the next row
+    DEC  DH
+    JNZ  T7RowLoop
+
+    ; --- Step 3: display the result ---
+    CALL DisplayVertReflected
 
     POP  DI
     POP  SI
@@ -936,7 +1132,88 @@ PROC Task7_VertReflect
     POP  BX
     POP  AX
     RET
-ENDP Task7_VertReflect
+
+Task7_VertReflect ENDP
+
+;---------------------------------------------------------------------------
+; DisplayVertReflected
+;   Clears screen, prints header, then displays vert_reflected_matrix
+;   row by row in WHITE. Same structure as all other display procs.
+;---------------------------------------------------------------------------
+DisplayVertReflected PROC
+
+    PUSH AX
+    PUSH BX
+    PUSH CX
+    PUSH DX
+    PUSH SI
+
+    CALL ClearScreen
+
+    MOV  DH, 0
+    MOV  DL, 1
+    CALL SetCursorPos
+    CALL PrintDateTime
+
+    MOV  DH, 1
+    MOV  DL, 10
+    CALL SetCursorPos
+    LEA  SI, str_process          ; "MATRIX PROCESSING" (reused from Task 6)
+    CALL PrintString
+
+    MOV  DH, 2
+    MOV  DL, 5
+    CALL SetCursorPos
+    LEA  SI, str_t7_sub
+    CALL PrintString
+
+    MOV  DH, 4
+    LEA  SI, vert_reflected_matrix
+    MOV  BH, ROWS                 ; BH = row counter (CX needed by inner LOOP)
+
+T7DispRow:
+    MOV  DL, 18
+    CALL SetCursorPos
+    MOV  CX, COLS
+
+T7DispCol:
+    LODSB
+    PUSH CX
+    MOV  BL, WHITE_ON_BLACK
+    CALL DisplayColorChar
+    MOV  AL, ' '
+    CALL DisplayColorChar
+    POP  CX
+    LOOP T7DispCol
+
+    INC  DH
+    DEC  BH
+    JNZ  T7DispRow
+
+    POP  SI
+    POP  DX
+    POP  CX
+    POP  BX
+    POP  AX
+    RET
+
+DisplayVertReflected ENDP
+
+;===========================================================================
+; Add to .DATA:
+;
+;   vert_reflected_matrix  DB 28 DUP(0)
+;   str_t7_sub             DB '_______Vertical Reflexion of the Matrix______',0
+;
+; Add to MAIN after Task 6:
+;
+;   CALL Task7_VertReflect
+;   MOV  AH, 00h
+;   INT  16h
+;===========================================================================
+
+
+
 
 ;===========================================================================
 ; UTILITY PROCEDURES
@@ -944,26 +1221,28 @@ ENDP Task7_VertReflect
 
 ;---------------------------------------------------------------------------
 ; ClearScreen
-; Scrolls the entire 80x25 text screen up by 0 lines (= blank it) using
-; INT 10h / AH=06h, then homes the cursor to position (0, 0).
+;   INT 10h / AH=06h scrolls a region of the screen upward.
+;   When AL=0 (scroll 0 lines), it clears the entire region instead.
+;   We use it to blank the whole 80x25 screen, then home the cursor.
 ;---------------------------------------------------------------------------
-PROC ClearScreen
+ClearScreen PROC
+
     PUSH AX
     PUSH BX
     PUSH CX
     PUSH DX
 
-    MOV  AH, 06h
-    MOV  AL, 00h               ; scroll 0 lines = clear entire window
-    MOV  BH, WHITE_ON_BLACK    ; fill attribute for blanked area
-    MOV  CX, 0000h             ; top-left corner  (row 0, col 0)
-    MOV  DH, 24                ; bottom-right row
-    MOV  DL, 79                ; bottom-right col
+    MOV  AH, 06h         ; BIOS video: scroll window up
+    MOV  AL, 00h         ; 0 lines = clear the whole window
+    MOV  BH, WHITE_ON_BLACK  ; fill cleared area with this attribute
+    MOV  CX, 0000h       ; top-left corner: row 0, col 0
+    MOV  DH, 24          ; bottom-right row
+    MOV  DL, 79          ; bottom-right col
     INT  10h
 
-    MOV  AH, 02h               ; set cursor position
-    MOV  BH, 0                 ; page 0
-    MOV  DX, 0                 ; row 0, col 0
+    MOV  AH, 02h         ; BIOS video: set cursor position
+    MOV  BH, 0           ; page 0
+    MOV  DX, 0           ; DH=row 0, DL=col 0
     INT  10h
 
     POP  DX
@@ -971,53 +1250,55 @@ PROC ClearScreen
     POP  BX
     POP  AX
     RET
-ENDP ClearScreen
+
+ClearScreen ENDP
 
 ;---------------------------------------------------------------------------
 ; SetCursorPos
-; Input: DH = screen row,  DL = screen column
+;   Input: DH = row (0-24),  DL = column (0-79)
 ;---------------------------------------------------------------------------
-PROC SetCursorPos
+SetCursorPos PROC
+
     PUSH AX
     PUSH BX
 
-    MOV  AH, 02h
-    MOV  BH, 0                 ; page 0
-    INT  10h
+    MOV  AH, 02h   ; BIOS: set cursor position
+    MOV  BH, 0     ; video page 0
+    INT  10h       ; DH:DL already set by caller
 
     POP  BX
     POP  AX
     RET
-ENDP SetCursorPos
+
+SetCursorPos ENDP
 
 ;---------------------------------------------------------------------------
 ; DisplayColorChar
-; Prints a single character with a specified colour attribute at the
-; current cursor position, then advances the cursor one column to the right.
+;   Prints one character at the current cursor position with a given color,
+;   then manually moves the cursor one step to the right.
 ;
-; Input:  AL = character to print
-;         BL = colour attribute byte (e.g. WHITE_ON_BLACK, RED_ON_BLACK)
+;   Input: AL = character to print,  BL = color attribute
 ;
-; Method: INT 10h / AH=09h writes char+attr without moving the cursor,
-;         so we follow it with INT 10h / AH=03h (get cursor) and manually
-;         increment DL, then INT 10h / AH=02h (set cursor).
+;   Note: INT 10h / AH=09h writes the char+color but does NOT move the
+;   cursor, so we have to do that ourselves with a get+increment+set sequence.
 ;---------------------------------------------------------------------------
-PROC DisplayColorChar
+DisplayColorChar PROC
+
     PUSH AX
     PUSH BX
     PUSH CX
     PUSH DX
 
-    MOV  AH, 09h               ; write character and attribute
-    MOV  BH, 0                 ; page 0
-    MOV  CX, 1                 ; write 1 copy
-    INT  10h
+    MOV  AH, 09h   ; BIOS: write character and attribute at cursor
+    MOV  BH, 0     ; page 0
+    MOV  CX, 1     ; print it once
+    INT  10h       ; cursor stays in place after this
 
-    MOV  AH, 03h               ; read current cursor position into DX
+    MOV  AH, 03h   ; BIOS: get current cursor position -> returned in DH:DL
     MOV  BH, 0
     INT  10h
-    INC  DL                    ; advance cursor one column
-    MOV  AH, 02h               ; set new cursor position
+    INC  DL        ; move one column to the right
+    MOV  AH, 02h   ; BIOS: set cursor to the new position
     INT  10h
 
     POP  DX
@@ -1025,197 +1306,218 @@ PROC DisplayColorChar
     POP  BX
     POP  AX
     RET
-ENDP DisplayColorChar
+
+DisplayColorChar ENDP
 
 ;---------------------------------------------------------------------------
 ; PrintString
-; Prints a null-terminated string at the current cursor position using
-; INT 10h / AH=0Eh (TTY write, auto-advances cursor).
-; Input: DS:SI = pointer to string (modified; restored on return)
+;   Prints a null-terminated string. SI must point to the first character.
+;   Reads one byte at a time until it hits the 0 terminator.
 ;---------------------------------------------------------------------------
-PROC PrintString
+PrintString PROC
+
     PUSH AX
     PUSH BX
     PUSH SI
 
-@@PS_loop:
-    LODSB                      ; AL = next character
-    CMP  AL, 0
-    JE   @@PS_done             ; null terminator reached
-    MOV  AH, 0Eh
+PSLoop:
+    LODSB            ; AL = next char, SI++
+    CMP  AL, 0       ; is it the null terminator?
+    JE   PSDone
+    MOV  AH, 0Eh     ; BIOS TTY output: prints AL and advances cursor
     MOV  BH, 0
     INT  10h
-    JMP  @@PS_loop
-@@PS_done:
+    JMP  PSLoop
 
+PSDone:
     POP  SI
     POP  BX
     POP  AX
     RET
-ENDP PrintString
+
+PrintString ENDP
 
 ;---------------------------------------------------------------------------
 ; PrintTwoDigits
-; Prints a value 0-99 as exactly two decimal ASCII digits at the current
-; cursor position (e.g. 7 -> "07", 42 -> "42").
-; Input: AL = value (0..99)
-; Note: Saves units digit to CL BEFORE the first INT 10h call because
-;       INT 10h corrupts AH, which would overwrite the remainder.
+;   Prints a value 0-99 as exactly two decimal digits (e.g. 7 -> "07").
+;   Input: AL = value
+;
+;   DIV BL divides AX by BL.  Result: AL = quotient,  AH = remainder.
+;   So  37 / 10  gives  AL=3 (tens),  AH=7 (units).
+;
+;   Important: we save AH into CL BEFORE calling INT 10h, because INT 10h
+;   uses AH for its own function code and would overwrite our units digit.
 ;---------------------------------------------------------------------------
-PROC PrintTwoDigits
+PrintTwoDigits PROC
+
     PUSH AX
     PUSH BX
     PUSH CX
     PUSH DX
 
-    MOV  AH, 0
+    MOV  AH, 0     ; clear AH so the division is  AX / BL  not garbage
     MOV  BL, 10
-    DIV  BL                    ; AL = tens digit,  AH = units digit
-    MOV  CL, AH                ; save units NOW before INT 10h clobbers AH
-    ADD  AL, '0'               ; tens digit -> ASCII
+    DIV  BL        ; AL = tens digit,  AH = units digit
+    MOV  CL, AH    ; save units in CL now, before INT 10h destroys AH
+
+    ADD  AL, '0'   ; convert numeric digit to its ASCII character
     MOV  AH, 0Eh
     MOV  BH, 0
-    INT  10h                   ; print tens
+    INT  10h       ; print tens digit  (AH is now clobbered, that's fine)
 
-    MOV  AL, CL
-    ADD  AL, '0'               ; units digit -> ASCII
+    MOV  AL, CL    ; recover units from CL
+    ADD  AL, '0'
     MOV  AH, 0Eh
-    INT  10h                   ; print units
+    MOV  BH, 0
+    INT  10h       ; print units digit
 
     POP  DX
     POP  CX
     POP  BX
     POP  AX
     RET
-ENDP PrintTwoDigits
+
+PrintTwoDigits ENDP
 
 ;---------------------------------------------------------------------------
 ; PrintYear
-; Prints a four-digit year (e.g. 2026) at the current cursor position.
-; Input: AX = year (e.g. 2026)
-; Method: divides by 100 to separate century (20) from year-within-century
-;         (26), then calls PrintTwoDigits for each part.
+;   Prints a 16-bit year (e.g. 2026) as four digits.
+;   Input: AX = year
+;
+;   Strategy: split into two 2-digit parts.
+;   2026 / 100 = 20 remainder 26  ->  print "20" then "26"
+;
+;   DIV BX divides DX:AX by BX.  Result: AX = quotient,  DX = remainder.
+;   We zero DX first so there's no garbage in the high part of the dividend.
 ;---------------------------------------------------------------------------
-PROC PrintYear
+PrintYear PROC
+
     PUSH AX
     PUSH BX
     PUSH CX
     PUSH DX
 
     MOV  BX, 100
-    MOV  DX, 0
-    DIV  BX                    ; AX = century (20), DX = year-in-century (26)
-    MOV  CX, DX                ; save year-in-century
+    MOV  DX, 0     ; DX:AX is the dividend; clear DX so it doesn't interfere
+    DIV  BX        ; AX = century part (20),  DX = year-in-century (26)
+    MOV  CX, DX    ; save the remainder before PrintTwoDigits overwrites DX
 
-    CALL PrintTwoDigits        ; print "20"
+    CALL PrintTwoDigits   ; prints the century ("20")
     MOV  AX, CX
-    CALL PrintTwoDigits        ; print "26"
+    CALL PrintTwoDigits   ; prints the year-in-century ("26")
 
     POP  DX
     POP  CX
     POP  BX
     POP  AX
     RET
-ENDP PrintYear
+
+PrintYear ENDP
 
 ;---------------------------------------------------------------------------
 ; PrintDateTime
-; Prints the current system date and time in the format:
-;   DayName DD Mon YYYY  HH:MM:SS
-; e.g.: "Tue 07 Apr 2026  17:15:02"
+;   Reads the system date and time from DOS, then prints:
+;       DayName  DD Mon YYYY  HH:MM:SS
 ;
-; Uses INT 21h / AH=2Ah for date and INT 21h / AH=2Ch for time.
-; Values are stored in dt_* memory variables to survive the INT calls
-; and avoid register corruption across the multiple INT 10h TTY writes.
+;   We store everything into the dt_* variables right after the INT calls,
+;   because subsequent INT calls would overwrite the registers.
+;
+;   INT 21h / AH=2Ah  returns: CX=year, DH=month, DL=day, AL=day-of-week
+;   INT 21h / AH=2Ch  returns: CH=hour, CL=minute, DH=second
 ;---------------------------------------------------------------------------
-PROC PrintDateTime
+PrintDateTime PROC
+
     PUSH AX
     PUSH BX
     PUSH CX
     PUSH DX
     PUSH SI
 
-    ;--- Capture date: INT 21h / AH=2Ah -----------------------------------
     MOV  AH, 2Ah
-    INT  21h                   ; CX=year, DH=month(1-12), DL=day, AL=dow(0=Sun)
-    MOV  [dt_dow],  AL
-    MOV  [dt_day],  DL
-    MOV  [dt_mon],  DH
-    MOV  [dt_year], CX
+    INT  21h
+    MOV  dt_dow,  AL   ; save before the next INT call overwrites everything
+    MOV  dt_day,  DL
+    MOV  dt_mon,  DH
+    MOV  dt_year, CX
 
-    ;--- Capture time: INT 21h / AH=2Ch -----------------------------------
     MOV  AH, 2Ch
-    INT  21h                   ; CH=hours, CL=minutes, DH=seconds
-    MOV  [dt_hour], CH
-    MOV  [dt_min],  CL
-    MOV  [dt_sec],  DH
+    INT  21h
+    MOV  dt_hour, CH
+    MOV  dt_min,  CL
+    MOV  dt_sec,  DH
 
-    ;--- Print 3-char day name (e.g. "Mon") --------------------------------
-    MOV  BL, [dt_dow]
+    ; --- print day name (e.g. "Mon") ---
+    ; day_names has 7 entries of 3 bytes each.
+    ; To get entry N: SI = base + N*3
+    MOV  BL, dt_dow
     MOV  BH, 0
     MOV  AL, 3
-    MUL  BL                    ; AX = dow * 3 = byte offset into day_names
-    LEA  SI, [day_names]
-    ADD  SI, AX                ; SI -> first char of day name
+    MUL  BL            ; AX = dt_dow * 3  (byte offset into the table)
+    LEA  SI, day_names
+    ADD  SI, AX        ; SI now points to the right 3-char entry
     MOV  CX, 3
-@@PDT_day:
+PDDayLoop:
     LODSB
     MOV  AH, 0Eh
     MOV  BH, 0
     INT  10h
-    LOOP @@PDT_day
-    MOV  AL, ' '               ; space after day name
+    LOOP PDDayLoop
+
+    MOV  AL, ' '
     MOV  AH, 0Eh
     INT  10h
 
-    ;--- Print two-digit day number (e.g. "07") ----------------------------
-    MOV  AL, [dt_day]
+    ; --- print day number ---
+    MOV  AL, dt_day
     CALL PrintTwoDigits
     MOV  AL, ' '
     MOV  AH, 0Eh
     INT  10h
 
-    ;--- Print 3-char month name (e.g. "Apr") ------------------------------
-    MOV  BL, [dt_mon]
-    DEC  BL                    ; convert 1-based month to 0-based index
+    ; --- print month name (same table-lookup trick as day name) ---
+    MOV  BL, dt_mon
+    DEC  BL            ; month is 1-based, table is 0-based, so subtract 1
     MOV  BH, 0
     MOV  AL, 3
-    MUL  BL                    ; AX = (month-1) * 3
-    LEA  SI, [month_names]
+    MUL  BL
+    LEA  SI, month_names
     ADD  SI, AX
     MOV  CX, 3
-@@PDT_mon:
+PDMonLoop:
     LODSB
     MOV  AH, 0Eh
     MOV  BH, 0
     INT  10h
-    LOOP @@PDT_mon
+    LOOP PDMonLoop
+
     MOV  AL, ' '
     MOV  AH, 0Eh
     INT  10h
 
-    ;--- Print four-digit year (e.g. "2026") --------------------------------
-    MOV  AX, [dt_year]
+    ; --- print year (4 digits) ---
+    MOV  AX, dt_year
     CALL PrintYear
-    MOV  AL, ' '               ; two spaces to separate date from time
+
+    ; two spaces between date and time
+    MOV  AL, ' '
     MOV  AH, 0Eh
     INT  10h
     MOV  AL, ' '
     MOV  AH, 0Eh
     INT  10h
 
-    ;--- Print HH:MM:SS time -----------------------------------------------
-    MOV  AL, [dt_hour]
+    ; --- print HH:MM:SS ---
+    MOV  AL, dt_hour
     CALL PrintTwoDigits
     MOV  AL, ':'
     MOV  AH, 0Eh
     INT  10h
-    MOV  AL, [dt_min]
+    MOV  AL, dt_min
     CALL PrintTwoDigits
     MOV  AL, ':'
     MOV  AH, 0Eh
     INT  10h
-    MOV  AL, [dt_sec]
+    MOV  AL, dt_sec
     CALL PrintTwoDigits
 
     POP  SI
@@ -1224,8 +1526,125 @@ PROC PrintDateTime
     POP  BX
     POP  AX
     RET
-ENDP PrintDateTime
 
-ENDS _TEXT
+PrintDateTime ENDP
+
+
+;===========================================================================================
+;           THE ADDITIONAL TASK 
+;===========================================================================================
+
+;---------------------------------------------------------------------------
+; ComputeTotalSum
+;   Sums all 28 cells of normalized_matrix ('0'/'1') into total_sum.
+;   Since each cell is ASCII '0' or '1', we subtract '0' to get 0 or 1.
+;   All registers preserved.
+;---------------------------------------------------------------------------
+ComputeTotalSum PROC
+
+    PUSH AX
+    PUSH CX
+    PUSH SI
+
+    LEA  SI, [normalized_matrix]
+    MOV  CX, TOTAL_CELLS
+    MOV  AH, 0                  ; AH = running sum
+
+SumLoop:
+    LODSB                       ; AL = '0' or '1'
+    SUB  AL, '0'                ; convert ASCII to numeric (0 or 1)
+    ADD  AH, AL                 ; accumulate
+    LOOP SumLoop
+
+    MOV  total_sum, AH          ; store result
+
+    POP  SI
+    POP  CX
+    POP  AX
+    RET
+
+ComputeTotalSum ENDP
+
+;---------------------------------------------------------------------------
+; RunExtension
+;   Checks total_sum. If >= 10, runs Task 6 + Task 7 with 30sec waits.
+;   Displays a message either way so the user knows what happened.
+;   All registers preserved.
+;---------------------------------------------------------------------------
+RunExtension PROC
+
+    PUSH AX
+    PUSH BX
+    PUSH CX
+    PUSH DX
+    PUSH SI
+
+    CALL ClearScreen
+
+    ; --- print extension header ---
+    MOV  DH, 0
+    MOV  DL, 1
+    CALL SetCursorPos
+    CALL PrintDateTime
+
+    MOV  DH, 1
+    MOV  DL, 10
+    CALL SetCursorPos
+    LEA  SI, [str_ext_title]
+    CALL PrintString
+
+    ; --- print the computed sum on row 3 ---
+    MOV  DH, 3
+    MOV  DL, 5
+    CALL SetCursorPos
+
+    ; print "Total matrix sum = XX"
+    LEA  SI, [str_sum_label]
+    CALL PrintString
+    MOV  AL, total_sum
+    CALL PrintTwoDigits
+
+    ; --- check condition: sum >= 10? ---
+    MOV  AL, total_sum
+    CMP  AL, 10
+    JB   ExtSkip                ; sum < 10 -> skip
+
+    ; --- sum >= 10: run the extra tasks ---
+    MOV  DH, 5
+    MOV  DL, 5
+    CALL SetCursorPos
+    LEA  SI, [str_ext_run]
+    CALL PrintString
+
+    CALL Wait30Sec
+
+    CALL Task6_HorizReflect
+    CALL Wait30Sec
+
+    CALL Task7_VertReflect
+    CALL Wait30Sec
+
+    JMP  ExtDone
+
+ExtSkip:
+    ; --- sum < 10: display skip message ---
+    MOV  DH, 5
+    MOV  DL, 5
+    CALL SetCursorPos
+    LEA  SI, [str_ext_skip]
+    CALL PrintString
+
+    CALL Wait30Sec              ; still wait so the user can read the message
+
+ExtDone:
+    POP  SI
+    POP  DX
+    POP  CX
+    POP  BX
+    POP  AX
+    RET
+
+RunExtension ENDP
+
 
 END MAIN
